@@ -1,0 +1,75 @@
+[project]
+name = "ffmpeg-wrap"
+version = "0.1.0"
+description = "Typed fluent FFmpeg/ffprobe wrapper with msgspec models"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+authors = [{ name = "GitBib" }]
+keywords = ["ffmpeg", "ffprobe", "video", "audio", "media", "wrapper", "msgspec"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Multimedia :: Sound/Audio",
+    "Topic :: Multimedia :: Video",
+    "Typing :: Typed",
+]
+dependencies = [
+    "msgspec>=0.21.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/GitBib/ffmpeg-wrap"
+Repository = "https://github.com/GitBib/ffmpeg-wrap"
+Issues = "https://github.com/GitBib/ffmpeg-wrap/issues"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ffmpeg_wrap"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 120
+
+[tool.ruff.lint]
+select = [
+    "E", "W", "F", "I", "N", "UP", "B", "A", "C4", "SIM", "TCH", "PTH",
+    "RUF", "PERF", "FURB", "LOG", "T20", "RET", "PIE", "PL", "ASYNC",
+    "S", "FLY", "ERA", "TID", "ICN", "G", "EM", "RSE", "SLF", "ANN", "ARG", "FBT",
+]
+
+ignore = [
+    "ANN401", "ANN002", "ANN003", "ANN001",
+    "ARG002",
+    "S101", "S603", "S607", "S301",
+    "PLR0912", "PLR0913", "PLR0915", "PLR2004", "PLW0603", "PLC0415",
+    "EM101", "EM102", "TRY003", "TRY300",
+    "FBT001", "FBT002", "FBT003",
+    "G004", "G003",
+    "SIM108", "RET504",
+    "TC001", "TC002", "TC003",
+    "ERA001", "B904", "PERF203", "SLF001",
+    "N803", "N806", "N812",
+    "UP007", "RUF001", "ASYNC230",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"__init__.py" = ["TID252", "F401", "A004"]
+"_builder.py" = ["A001", "A004"]
+"test_*.py" = ["T20", "ANN", "S", "ERA", "PLR", "ARG", "FBT", "SLF", "E402", "E501", "B007", "G"]
