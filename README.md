@@ -1,5 +1,8 @@
 # ffmpeg-wrap
 
+[![Tests](https://github.com/GitBib/ffmpeg-wrap/actions/workflows/python-tests.yml/badge.svg)](https://github.com/GitBib/ffmpeg-wrap/actions/workflows/python-tests.yml)
+[![Prek checks](https://github.com/GitBib/ffmpeg-wrap/actions/workflows/prek.yml/badge.svg)](https://github.com/GitBib/ffmpeg-wrap/actions/workflows/prek.yml)
+
 A typed Python wrapper for FFmpeg and ffprobe CLI tools. Build FFmpeg commands with a fluent API and parse ffprobe output into typed data structures.
 
 ## Requirements
