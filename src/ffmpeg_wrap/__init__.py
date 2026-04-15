@@ -2,7 +2,7 @@ from importlib.metadata import version
 
 from ._builder import FFmpeg, input
 from ._errors import FFmpegError
-from ._probe import Format, ProbeResult, Stream, probe
+from ._probe import Format, ProbeResult, Stream, probe, validate
 
 __version__ = version("ffmpeg-wrap")
 
@@ -14,4 +14,5 @@ __all__ = [
     "Stream",
     "input",
     "probe",
+    "validate",
 ]

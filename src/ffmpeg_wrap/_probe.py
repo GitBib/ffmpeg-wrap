@@ -9,6 +9,8 @@ from ._errors import FFmpegError
 
 logger = logging.getLogger("ffmpeg_wrap")
 
+_FFPROBE_LOGLEVELS = frozenset({"quiet", "panic", "fatal", "error", "warning", "info", "verbose", "debug", "trace"})
+
 # Known ffmpeg protocols that use "name:" or "name:arg" syntax (no "://").
 # Kept as a whitelist to avoid matching POSIX filenames containing colons.
 _FFMPEG_SIMPLE_PROTOCOLS = frozenset(
@@ -57,6 +59,20 @@ def _is_special_input(filename: str) -> bool:
     return False
 
 
+def _resolve_input(filename: str | os.PathLike[str]) -> str:
+    """Resolve a filename argument to the string passed to ffprobe/ffmpeg.
+
+    PathLike objects are always treated as filesystem paths and resolved to
+    absolute form.  Plain strings are checked for ffmpeg special-input syntax
+    (protocols, pipe:, URLs, "-") and passed through unchanged when detected;
+    otherwise they are resolved as filesystem paths.
+    """
+    filename_str = os.fsdecode(filename)
+    if isinstance(filename, os.PathLike) or not _is_special_input(filename_str):
+        return str(Path(filename_str).resolve())
+    return filename_str
+
+
 class Stream(msgspec.Struct):
     """A single stream from ffprobe output."""
 
@@ -96,6 +112,50 @@ class ProbeResult(msgspec.Struct):
     format: Format | None = None
 
 
+def validate(
+    filename: str | os.PathLike[str],
+    ffprobe_path: str = "ffprobe",
+    loglevel: str = "warning",
+    extra_args: tuple[str, ...] = (),
+) -> tuple[bool, str]:
+    """Run ffprobe in validation mode and report diagnostics.
+
+    Args:
+        filename: Path to the media file (str or PathLike).
+        ffprobe_path: Path to the ffprobe executable.
+        loglevel: Value passed to ffprobe's ``-v`` flag. Defaults to
+            ``"warning"`` so DTS/codec warnings surface in stderr.
+            Use ``"error"`` for a stricter check that ignores warnings,
+            ``"fatal"``/``"panic"`` for only unrecoverable failures,
+            or any other ffprobe loglevel keyword. See ``ffprobe -loglevel help``.
+        extra_args: Additional raw arguments forwarded to ffprobe before the
+            filename, e.g. ``("-show_format",)``. Use with care; no validation
+            is performed on these args.
+
+    Returns:
+        (ok, stderr_text). ok is True iff ffprobe exit code == 0 AND
+        stderr.strip() is empty. stderr_text is the raw decoded stderr
+        (never None, possibly empty string).
+
+    Does NOT raise on bad media — that is a normal outcome for a validator.
+    Raises FFmpegError only when the ffprobe executable cannot be run.
+    Raises ValueError on invalid loglevel.
+    """
+    if loglevel not in _FFPROBE_LOGLEVELS:
+        msg = f"invalid loglevel {loglevel!r}, must be one of: {', '.join(sorted(_FFPROBE_LOGLEVELS))}"
+        raise ValueError(msg)
+    filename_str = _resolve_input(filename)
+    cmd = [ffprobe_path, "-v", loglevel, *[str(a) for a in extra_args], filename_str]
+    try:
+        result = subprocess.run(cmd, capture_output=True, check=False, text=False)
+    except OSError as e:
+        logger.error(f"ffprobe could not be executed: {e}")
+        raise FFmpegError(f"ffprobe could not be executed: {e}") from e
+    stderr_text = result.stderr.decode("utf-8", errors="replace")
+    ok = result.returncode == 0 and not stderr_text.strip()
+    return (ok, stderr_text)
+
+
 def probe(filename: str | os.PathLike[str], ffprobe_path: str = "ffprobe") -> ProbeResult:
     """Run ffprobe on the specified file and return typed output.
 
@@ -109,10 +169,7 @@ def probe(filename: str | os.PathLike[str], ffprobe_path: str = "ffprobe") -> Pr
     Raises:
         FFmpegError: If ffprobe fails or output cannot be parsed.
     """
-    filename_str = os.fsdecode(filename)
-    # PathLike objects are always filesystem paths; only check special input for bare strings
-    if isinstance(filename, os.PathLike) or not _is_special_input(filename_str):
-        filename_str = str(Path(filename_str).resolve())
+    filename_str = _resolve_input(filename)
 
     cmd = [
         ffprobe_path,
@@ -136,9 +193,9 @@ def probe(filename: str | os.PathLike[str], ffprobe_path: str = "ffprobe") -> Pr
         err_msg = e.stderr.decode("utf-8", errors="replace") if e.stderr else str(e)
         logger.error(f"ffprobe failed: {err_msg}")
         raise FFmpegError(f"ffprobe error: {err_msg}") from e
-    except FileNotFoundError as e:
-        logger.error(f"ffprobe executable not found: {e}")
-        raise FFmpegError(f"ffprobe not found: {e}") from e
+    except OSError as e:
+        logger.error(f"ffprobe could not be executed: {e}")
+        raise FFmpegError(f"ffprobe could not be executed: {e}") from e
     except (msgspec.DecodeError, msgspec.ValidationError) as e:
         logger.error(f"Failed to parse ffprobe output: {e}")
         raise FFmpegError(f"ffprobe output parsing error: {e}") from e
