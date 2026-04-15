@@ -1,3 +1,4 @@
+import contextlib
 import os
 import subprocess
 from pathlib import Path
@@ -7,7 +8,48 @@ import msgspec
 import pytest
 
 from ffmpeg_wrap._errors import FFmpegError
-from ffmpeg_wrap._probe import Format, ProbeResult, Stream, probe
+from ffmpeg_wrap._probe import Format, ProbeResult, Stream, _resolve_input, probe, validate
+
+
+class TestResolveInput:
+    def test_regular_string_path(self):
+        result = _resolve_input("video.mkv")
+        assert result == str(Path("video.mkv").resolve())
+
+    def test_path_object(self):
+        result = _resolve_input(Path("video.mkv"))
+        assert result == str(Path("video.mkv").resolve())
+
+    def test_pipe_protocol(self):
+        assert _resolve_input("pipe:") == "pipe:"
+        assert _resolve_input("pipe:0") == "pipe:0"
+
+    def test_url(self):
+        assert _resolve_input("http://example.com/video.mp4") == "http://example.com/video.mp4"
+        assert _resolve_input("rtmp://stream.example.com/live") == "rtmp://stream.example.com/live"
+
+    def test_bytes_pathlike(self):
+        class BytesPath(os.PathLike):
+            def __fspath__(self):
+                return b"video.mkv"
+
+        result = _resolve_input(BytesPath())
+        assert result == str(Path("video.mkv").resolve())
+
+    def test_protocol_looking_filename_md5(self):
+        result = _resolve_input("md5:clip.mkv")
+        assert result == str(Path("md5:clip.mkv").resolve())
+
+    def test_protocol_looking_filename_tee(self):
+        result = _resolve_input("tee:output.mkv")
+        assert result == str(Path("tee:output.mkv").resolve())
+
+    def test_dash_stdin(self):
+        assert _resolve_input("-") == "-"
+
+    def test_posix_colon_in_filename(self):
+        result = _resolve_input("foo:bar.mkv")
+        assert result == str(Path("foo:bar.mkv").resolve())
 
 
 class TestStream:
@@ -385,5 +427,168 @@ class TestProbeFunction:
     @patch("ffmpeg_wrap._probe.subprocess.run")
     def test_probe_raises_ffmpeg_error_on_missing_binary(self, mock_run):
         mock_run.side_effect = FileNotFoundError("No such file or directory: 'ffprobe'")
-        with pytest.raises(FFmpegError, match="ffprobe not found"):
+        with pytest.raises(FFmpegError, match="ffprobe could not be executed"):
             probe("video.mkv")
+
+    @patch("ffmpeg_wrap._probe.subprocess.run")
+    def test_probe_raises_ffmpeg_error_on_permission_error(self, mock_run):
+        mock_run.side_effect = PermissionError("[Errno 13] Permission denied: '/usr/bin/ffprobe'")
+        with pytest.raises(FFmpegError, match="ffprobe could not be executed"):
+            probe("video.mkv")
+
+
+class TestValidate:
+    @patch("ffmpeg_wrap._probe.subprocess.run")
+    def test_validate_returns_true_on_clean_file(self, mock_run):
+        mock_run.return_value = subprocess.CompletedProcess(args=[], returncode=0, stdout=b"", stderr=b"")
+        ok, stderr = validate("video.mkv")
+        assert ok is True
+        assert stderr == ""
+
+    @patch("ffmpeg_wrap._probe.subprocess.run")
+    def test_validate_returns_false_on_nonzero_exit(self, mock_run):
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=[], returncode=1, stdout=b"", stderr=b"moov atom not found"
+        )
+        ok, stderr = validate("broken.mkv")
+        assert ok is False
+        assert stderr == "moov atom not found"
+
+    @patch("ffmpeg_wrap._probe.subprocess.run")
+    def test_validate_returns_false_on_warnings_with_zero_exit(self, mock_run):
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout=b"", stderr=b"non-monotonic DTS"
+        )
+        ok, stderr = validate("warning.mkv")
+        assert ok is False
+        assert stderr == "non-monotonic DTS"
+
+    @patch("ffmpeg_wrap._probe.subprocess.run")
+    def test_validate_returns_false_on_nonexistent_file(self, mock_run):
+        mock_run.return_value = subprocess.CompletedProcess(args=[], returncode=1, stdout=b"", stderr=b"No such file")
+        ok, stderr = validate("/nonexistent/file.mkv")
+        assert ok is False
+        assert stderr == "No such file"
+
+    @patch("ffmpeg_wrap._probe.subprocess.run")
+    def test_validate_raises_on_missing_binary(self, mock_run):
+        mock_run.side_effect = FileNotFoundError("No such file or directory: 'ffprobe'")
+        with pytest.raises(FFmpegError, match="ffprobe could not be executed"):
+            validate("video.mkv")
+
+    @patch("ffmpeg_wrap._probe.subprocess.run")
+    def test_validate_builds_correct_command(self, mock_run):
+        mock_run.return_value = subprocess.CompletedProcess(args=[], returncode=0, stdout=b"", stderr=b"")
+        validate("video.mkv")
+        cmd = mock_run.call_args[0][0]
+        resolved = str(Path("video.mkv").resolve())
+        assert cmd == ["ffprobe", "-v", "warning", resolved]
+
+    @patch("ffmpeg_wrap._probe.subprocess.run")
+    def test_validate_custom_loglevel(self, mock_run):
+        mock_run.return_value = subprocess.CompletedProcess(args=[], returncode=0, stdout=b"", stderr=b"")
+        validate("video.mkv", loglevel="error")
+        cmd = mock_run.call_args[0][0]
+        resolved = str(Path("video.mkv").resolve())
+        assert cmd == ["ffprobe", "-v", "error", resolved]
+
+    @patch("ffmpeg_wrap._probe.subprocess.run")
+    def test_validate_extra_args_forwarded_before_filename(self, mock_run):
+        mock_run.return_value = subprocess.CompletedProcess(args=[], returncode=0, stdout=b"", stderr=b"")
+        validate("video.mkv", loglevel="error", extra_args=("-show_format", "-hide_banner"))
+        cmd = mock_run.call_args[0][0]
+        resolved = str(Path("video.mkv").resolve())
+        assert cmd == ["ffprobe", "-v", "error", "-show_format", "-hide_banner", resolved]
+
+    @patch("ffmpeg_wrap._probe.subprocess.run")
+    def test_validate_custom_ffprobe_path(self, mock_run):
+        mock_run.return_value = subprocess.CompletedProcess(args=[], returncode=0, stdout=b"", stderr=b"")
+        validate("video.mkv", ffprobe_path="/usr/local/bin/ffprobe")
+        cmd = mock_run.call_args[0][0]
+        assert cmd[0] == "/usr/local/bin/ffprobe"
+
+    @patch("ffmpeg_wrap._probe.subprocess.run")
+    def test_validate_with_pathlike(self, mock_run):
+        mock_run.return_value = subprocess.CompletedProcess(args=[], returncode=0, stdout=b"", stderr=b"")
+        validate(Path("video.mkv"))
+        cmd = mock_run.call_args[0][0]
+        resolved = str(Path("video.mkv").resolve())
+        assert cmd[-1] == resolved
+
+    @patch("ffmpeg_wrap._probe.subprocess.run")
+    def test_validate_with_pipe_skips_resolve(self, mock_run):
+        mock_run.return_value = subprocess.CompletedProcess(args=[], returncode=0, stdout=b"", stderr=b"")
+        validate("pipe:")
+        cmd = mock_run.call_args[0][0]
+        assert cmd[-1] == "pipe:"
+
+    @patch("ffmpeg_wrap._probe.subprocess.run")
+    def test_validate_with_url_skips_resolve(self, mock_run):
+        mock_run.return_value = subprocess.CompletedProcess(args=[], returncode=0, stdout=b"", stderr=b"")
+        validate("http://example.com/video.mp4")
+        cmd = mock_run.call_args[0][0]
+        assert cmd[-1] == "http://example.com/video.mp4"
+
+    @patch("ffmpeg_wrap._probe.subprocess.run")
+    def test_validate_strips_whitespace_only_stderr(self, mock_run):
+        mock_run.return_value = subprocess.CompletedProcess(args=[], returncode=0, stdout=b"", stderr=b"   \n")
+        ok, stderr = validate("video.mkv")
+        assert ok is True
+        assert stderr == "   \n"
+
+    @patch("ffmpeg_wrap._probe.subprocess.run")
+    def test_validate_preserves_utf8_in_stderr(self, mock_run):
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=[], returncode=1, stdout=b"", stderr="ошибка кодека".encode()
+        )
+        ok, stderr = validate("video.mkv")
+        assert ok is False
+        assert stderr == "ошибка кодека"
+
+    @patch("ffmpeg_wrap._probe.subprocess.run")
+    def test_validate_with_dash_skips_resolve(self, mock_run):
+        mock_run.return_value = subprocess.CompletedProcess(args=[], returncode=0, stdout=b"", stderr=b"")
+        validate("-")
+        cmd = mock_run.call_args[0][0]
+        assert cmd[-1] == "-"
+
+    @patch("ffmpeg_wrap._probe.subprocess.run")
+    def test_validate_replaces_invalid_utf8_in_stderr(self, mock_run):
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=[], returncode=1, stdout=b"", stderr=b"bad codec \xff\xfe data"
+        )
+        ok, stderr = validate("video.mkv")
+        assert ok is False
+        assert "\ufffd" in stderr
+
+    @patch("ffmpeg_wrap._probe.subprocess.run")
+    def test_validate_subprocess_kwargs(self, mock_run):
+        mock_run.return_value = subprocess.CompletedProcess(args=[], returncode=0, stdout=b"", stderr=b"")
+        validate("video.mkv")
+        kwargs = mock_run.call_args[1]
+        assert kwargs["capture_output"] is True
+        assert kwargs["check"] is False
+
+    @patch("ffmpeg_wrap._probe.subprocess.run")
+    def test_validate_raises_on_permission_error(self, mock_run):
+        mock_run.side_effect = PermissionError("[Errno 13] Permission denied: '/usr/bin/ffprobe'")
+        with pytest.raises(FFmpegError, match="ffprobe could not be executed"):
+            validate("video.mkv")
+
+    def test_validate_raises_on_invalid_loglevel(self):
+        with pytest.raises(ValueError, match="invalid loglevel"):
+            validate("video.mkv", loglevel="warningg")
+
+    def test_validate_accepts_all_valid_loglevels(self):
+        valid = {"quiet", "panic", "fatal", "error", "warning", "info", "verbose", "debug", "trace"}
+        for level in valid:
+            with contextlib.suppress(FFmpegError, OSError):
+                validate("video.mkv", loglevel=level)
+
+    @patch("ffmpeg_wrap._probe.subprocess.run")
+    def test_validate_extra_args_coerced_to_str(self, mock_run):
+        mock_run.return_value = subprocess.CompletedProcess(args=[], returncode=0, stdout=b"", stderr=b"")
+        validate("video.mkv", extra_args=(Path("-hide_banner"),))
+        cmd = mock_run.call_args[0][0]
+        assert "-hide_banner" in cmd
+        assert all(isinstance(a, str) for a in cmd)

@@ -130,9 +130,9 @@ class FFmpeg:
             err_msg = e.stderr.decode("utf-8", errors="replace") if e.stderr else str(e)
             logger.error(f"FFmpeg command failed: {err_msg}")
             raise FFmpegError(f"ffmpeg error: {err_msg}") from e
-        except FileNotFoundError as e:
-            logger.error(f"FFmpeg executable not found: {e}")
-            raise FFmpegError(f"ffmpeg not found: {e}") from e
+        except OSError as e:
+            logger.error(f"ffmpeg could not be executed: {e}")
+            raise FFmpegError(f"ffmpeg could not be executed: {e}") from e
 
 
 def _convert_arg(key: str, value: Any) -> list[str]:

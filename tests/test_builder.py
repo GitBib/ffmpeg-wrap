@@ -206,7 +206,7 @@ class TestRun:
         mock_run.side_effect = FileNotFoundError("No such file or directory: 'ffmpeg'")
         ff = FFmpeg()
         ff.input("in.mkv").output("out.mp4")
-        with pytest.raises(FFmpegError, match="ffmpeg not found"):
+        with pytest.raises(FFmpegError, match="ffmpeg could not be executed"):
             ff.run()
 
     @patch("ffmpeg_wrap._builder.subprocess.run")
@@ -214,7 +214,15 @@ class TestRun:
         mock_run.side_effect = FileNotFoundError("No such file or directory: '/bad/path/ffmpeg'")
         ff = FFmpeg(ffmpeg_path="/bad/path/ffmpeg")
         ff.input("in.mkv").output("out.mp4")
-        with pytest.raises(FFmpegError, match="ffmpeg not found"):
+        with pytest.raises(FFmpegError, match="ffmpeg could not be executed"):
+            ff.run()
+
+    @patch("ffmpeg_wrap._builder.subprocess.run")
+    def test_run_raises_ffmpeg_error_on_permission_error(self, mock_run):
+        mock_run.side_effect = PermissionError("[Errno 13] Permission denied: '/usr/bin/ffmpeg'")
+        ff = FFmpeg()
+        ff.input("in.mkv").output("out.mp4")
+        with pytest.raises(FFmpegError, match="ffmpeg could not be executed"):
             ff.run()
 
 

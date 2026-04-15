@@ -80,6 +80,43 @@ stdout, stderr = (
 )
 ```
 
+### Validate a media file
+
+`validate()` checks whether a file is valid media without parsing full probe output.
+It returns a `(ok, stderr)` tuple instead of raising on bad media.
+
+```python
+ok, stderr = ffmpeg.validate("video.mkv")
+if not ok:
+    print(f"Invalid media: {stderr}")
+```
+
+The default `loglevel="warning"` surfaces ffprobe warnings (non-monotonic DTS,
+unsupported codecs, truncated frames) in addition to hard errors. Use a stricter
+level when only fatal problems matter:
+
+```python
+ok, stderr = ffmpeg.validate("video.mkv", loglevel="error")
+ok, stderr = ffmpeg.validate("video.mkv", loglevel="fatal")
+```
+
+Pass extra ffprobe flags via `extra_args`:
+
+```python
+ok, stderr = ffmpeg.validate("video.mkv", extra_args=("-hide_banner",))
+```
+
+Use `validate()` when you only need a pass/fail check. Use `probe()` when you need
+stream and format metadata. The only exception `validate()` raises is `FFmpegError`
+when the ffprobe executable could not be run (missing, not executable, etc.).
+
+```python
+try:
+    ok, stderr = ffmpeg.validate("video.mkv")
+except ffmpeg.FFmpegError:
+    print("ffprobe could not be executed")
+```
+
 ### Error handling
 
 ```python
@@ -99,6 +136,8 @@ except ffmpeg.FFmpegError as e:
 ```python
 result = ffmpeg.probe("video.mkv", ffprobe_path="/usr/local/bin/ffprobe")
 
+ok, stderr = ffmpeg.validate("video.mkv", ffprobe_path="/usr/local/bin/ffprobe")
+
 ffmpeg.input("input.mkv", ffmpeg_path="/usr/local/bin/ffmpeg").output("output.mp4").run()
 ```
 
@@ -112,6 +151,17 @@ Run ffprobe on a file and return a typed `ProbeResult`.
 - `ffprobe_path` -- Path to the ffprobe executable. Defaults to `"ffprobe"`.
 - Returns: `ProbeResult` with `streams` and `format` fields.
 - Raises: `FFmpegError` on subprocess failure or invalid output.
+
+### validate(filename, ffprobe_path="ffprobe", loglevel="warning", extra_args=())
+
+Run ffprobe in validation mode and check for errors/warnings.
+
+- `filename` -- Path to the media file (str or PathLike).
+- `ffprobe_path` -- Path to the ffprobe executable. Defaults to `"ffprobe"`.
+- `loglevel` -- Value passed to ffprobe's `-v` flag. Defaults to `"warning"` (surfaces DTS/codec warnings). Use `"error"` to ignore warnings or `"fatal"`/`"panic"` for only unrecoverable failures.
+- `extra_args` -- Additional raw arguments forwarded to ffprobe before the filename, e.g. `("-hide_banner",)`.
+- Returns: `tuple[bool, str]` -- `(ok, stderr_text)`. `ok` is `True` when ffprobe exits with code 0 and stderr is empty after stripping whitespace.
+- Raises: `FFmpegError` only when the ffprobe executable could not be run. Does not raise on invalid media.
 
 ### input(filename, ffmpeg_path="ffmpeg", **kwargs)
 
