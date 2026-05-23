@@ -13,6 +13,10 @@ def test_all_names_accessible():
     assert hasattr(ffmpeg, "FFmpeg")
     assert hasattr(ffmpeg, "input")
     assert hasattr(ffmpeg, "validate")
+    assert hasattr(ffmpeg, "CodecType")
+    assert hasattr(ffmpeg, "encoders")
+    assert hasattr(ffmpeg, "has_encoder")
+    assert hasattr(ffmpeg, "filter_arg_escape")
 
 
 def test_input_returns_ffmpeg_instance():
@@ -38,5 +42,18 @@ def test_validate_is_callable():
 
 def test_all_exports_match():
     """__all__ contains all expected public names."""
-    expected = {"FFmpegError", "Stream", "Format", "ProbeResult", "probe", "FFmpeg", "input", "validate"}
+    expected = {
+        "FFmpegError",
+        "Stream",
+        "Format",
+        "ProbeResult",
+        "probe",
+        "FFmpeg",
+        "input",
+        "validate",
+        "CodecType",
+        "encoders",
+        "has_encoder",
+        "filter_arg_escape",
+    }
     assert set(ffmpeg.__all__) == expected

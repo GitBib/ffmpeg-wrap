@@ -1,6 +1,6 @@
 [project]
 name = "ffmpeg-wrap"
-version = "0.2.0"
+version = "0.3.0"
 description = "Typed fluent FFmpeg/ffprobe wrapper with msgspec models"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -71,5 +71,6 @@ ignore = [
 
 [tool.ruff.lint.per-file-ignores]
 "__init__.py" = ["TID252", "F401", "A004"]
-"_builder.py" = ["A001", "A004"]
+"_builder.py" = ["A001", "A002", "A004"]
 "test_*.py" = ["T20", "ANN", "S", "ERA", "PLR", "ARG", "FBT", "SLF", "E402", "E501", "B007", "G"]
+"conftest.py" = ["ARG"]

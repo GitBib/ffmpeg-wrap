@@ -1,4 +1,3 @@
-import contextlib
 import os
 import subprocess
 from pathlib import Path
@@ -8,7 +7,7 @@ import msgspec
 import pytest
 
 from ffmpeg_wrap._errors import FFmpegError
-from ffmpeg_wrap._probe import Format, ProbeResult, Stream, _resolve_input, probe, validate
+from ffmpeg_wrap._probe import CodecType, Format, ProbeResult, Stream, _resolve_input, probe, validate
 
 
 class TestResolveInput:
@@ -87,6 +86,110 @@ class TestStream:
         assert stream.width is None
         assert stream.height is None
         assert stream.tags is None
+        assert stream.type_index == 0
+
+    def test_map_specifier_per_type(self):
+        assert Stream(index=0, codec_type="video").map_specifier() == "0:v:0"
+        assert Stream(index=2, codec_type="subtitle").map_specifier() == "0:s:0"
+        assert Stream(index=3, codec_type="audio", type_index=1).map_specifier() == "0:a:1"
+
+    def test_map_specifier_custom_input(self):
+        assert Stream(index=0, codec_type="audio").map_specifier(input_index=1) == "1:a:0"
+
+    def test_map_specifier_unknown_codec_type_uses_absolute_index(self):
+        assert Stream(index=4, codec_type=None).map_specifier() == "0:4"
+        assert Stream(index=5, codec_type="exotic").map_specifier() == "0:5"
+
+    def test_duration_seconds_numeric(self):
+        assert Stream(index=0, duration="120.5").duration_seconds() == 120.5
+
+    def test_duration_seconds_none(self):
+        assert Stream(index=0, duration=None).duration_seconds() is None
+
+    def test_duration_seconds_na(self):
+        assert Stream(index=0, duration="N/A").duration_seconds() is None
+
+    def test_duration_seconds_garbage(self):
+        assert Stream(index=0, duration="abc").duration_seconds() is None
+
+
+class TestStreamKindPredicates:
+    def test_is_video(self):
+        s = Stream(index=0, codec_type="video")
+        assert s.is_video is True
+        assert s.is_audio is False
+        assert s.is_subtitle is False
+        assert s.is_data is False
+        assert s.is_attachment is False
+
+    def test_is_audio(self):
+        s = Stream(index=1, codec_type="audio")
+        assert s.is_audio is True
+        assert s.is_video is False
+
+    def test_is_subtitle(self):
+        s = Stream(index=2, codec_type="subtitle")
+        assert s.is_subtitle is True
+        assert s.is_video is False
+
+    def test_is_data(self):
+        s = Stream(index=3, codec_type="data")
+        assert s.is_data is True
+        assert s.is_attachment is False
+
+    def test_is_attachment(self):
+        s = Stream(index=4, codec_type="attachment")
+        assert s.is_attachment is True
+        assert s.is_data is False
+
+    def test_none_codec_type_all_false(self):
+        s = Stream(index=0, codec_type=None)
+        assert not s.is_video
+        assert not s.is_audio
+        assert not s.is_subtitle
+        assert not s.is_data
+        assert not s.is_attachment
+        assert not s.is_text_subtitle
+        assert not s.is_image_subtitle
+
+    def test_unknown_codec_type_all_false(self):
+        s = Stream(index=0, codec_type="nut_metadata")
+        assert not s.is_video
+        assert not s.is_audio
+        assert not s.is_subtitle
+        assert not s.is_data
+        assert not s.is_attachment
+
+    def test_text_subtitle_classification(self):
+        for name in ("subrip", "ass", "ssa", "mov_text", "webvtt"):
+            s = Stream(index=0, codec_type="subtitle", codec_name=name)
+            assert s.is_text_subtitle is True, name
+            assert s.is_image_subtitle is False, name
+
+    def test_image_subtitle_classification(self):
+        for name in ("hdmv_pgs_subtitle", "dvd_subtitle", "dvb_subtitle"):
+            s = Stream(index=0, codec_type="subtitle", codec_name=name)
+            assert s.is_image_subtitle is True, name
+            assert s.is_text_subtitle is False, name
+
+    def test_unknown_subtitle_codec_neither(self):
+        s = Stream(index=0, codec_type="subtitle", codec_name="some_future_codec")
+        assert s.is_subtitle is True
+        assert s.is_text_subtitle is False
+        assert s.is_image_subtitle is False
+
+    def test_subtitle_predicates_require_subtitle_codec_type(self):
+        # codec_name matching a subtitle codec but wrong codec_type -> False
+        s = Stream(index=0, codec_type="audio", codec_name="subrip")
+        assert s.is_text_subtitle is False
+        assert s.is_image_subtitle is False
+
+    def test_codec_type_enum_values(self):
+        assert CodecType.VIDEO == "video"
+        assert CodecType.AUDIO == "audio"
+        assert CodecType.SUBTITLE == "subtitle"
+        assert CodecType.DATA == "data"
+        assert CodecType.ATTACHMENT == "attachment"
 
 
 class TestFormat:
@@ -122,6 +225,23 @@ class TestFormat:
         assert fmt.nb_streams is None
         assert fmt.duration is None
         assert fmt.tags is None
+
+    def test_duration_seconds_numeric(self):
+        assert Format(duration="120.500000").duration_seconds() == pytest.approx(120.5)
+
+    def test_duration_seconds_none(self):
+        assert Format(duration=None).duration_seconds() is None
+
+    def test_duration_seconds_na(self):
+        assert Format(duration="N/A").duration_seconds() is None
+
+    def test_duration_seconds_garbage(self):
+        assert Format(duration="not-a-number").duration_seconds() is None
+
+    def test_duration_seconds_preserves_raw_string(self):
+        fmt = Format(duration="120.500000")
+        assert fmt.duration_seconds() == pytest.approx(120.5)
+        assert fmt.duration == "120.500000"
 
 
 SAMPLE_FFPROBE_JSON = msgspec.json.encode(
@@ -165,6 +285,18 @@ class TestProbeResult:
         assert result.format.filename == "video.mkv"
         assert result.format.duration == "120.500000"
 
+    def test_duration_seconds_delegates_to_format(self):
+        result = msgspec.json.decode(SAMPLE_FFPROBE_JSON, type=ProbeResult)
+        assert result.duration_seconds() == pytest.approx(120.5)
+
+    def test_duration_seconds_none_when_no_format(self):
+        result = ProbeResult(streams=[], format=None)
+        assert result.duration_seconds() is None
+
+    def test_duration_seconds_na_format(self):
+        result = ProbeResult(streams=[], format=Format(duration="N/A"))
+        assert result.duration_seconds() is None
+
 
 class TestProbeFunction:
     @patch("ffmpeg_wrap._probe.subprocess.run")
@@ -179,10 +311,58 @@ class TestProbeFunction:
         assert result.format.duration == "120.500000"
 
     @patch("ffmpeg_wrap._probe.subprocess.run")
+    def test_probe_assigns_per_type_ordinals(self, mock_run):
+        sample = msgspec.json.encode(
+            {
+                "streams": [
+                    {"index": 0, "codec_type": "video"},
+                    {"index": 1, "codec_type": "audio"},
+                    {"index": 2, "codec_type": "audio"},
+                    {"index": 3, "codec_type": "subtitle"},
+                    {"index": 4, "codec_type": "subtitle"},
+                ]
+            }
+        )
+        mock_run.return_value = subprocess.CompletedProcess(args=[], returncode=0, stdout=sample, stderr=b"")
+        result = probe("video.mkv")
+        ordinals = [(s.codec_type, s.type_index) for s in result.streams]
+        assert ordinals == [
+            ("video", 0),
+            ("audio", 0),
+            ("audio", 1),
+            ("subtitle", 0),
+            ("subtitle", 1),
+        ]
+        assert result.streams[4].map_specifier() == "0:s:1"
+
+    @patch("ffmpeg_wrap._probe.subprocess.run")
+    def test_probe_decodes_exotic_codec_type_without_error(self, mock_run):
+        """An unknown codec_type must decode fine (codec_type stays str, not enum)."""
+        sample = msgspec.json.encode({"streams": [{"index": 0, "codec_type": "future_kind", "codec_name": "xyz"}]})
+        mock_run.return_value = subprocess.CompletedProcess(args=[], returncode=0, stdout=sample, stderr=b"")
+        result = probe("video.mkv")
+        stream = result.streams[0]
+        assert stream.codec_type == "future_kind"
+        assert stream.is_video is False
+        assert stream.is_audio is False
+        assert stream.is_subtitle is False
+
+    @patch("ffmpeg_wrap._probe.subprocess.run")
     def test_probe_raises_on_subprocess_failure(self, mock_run):
         mock_run.side_effect = subprocess.CalledProcessError(returncode=1, cmd=["ffprobe"], stderr=b"No such file")
         with pytest.raises(FFmpegError, match="ffprobe error"):
             probe("missing.mkv")
+
+    @patch("ffmpeg_wrap._probe.subprocess.run")
+    def test_probe_failure_populates_structured_error(self, mock_run):
+        mock_run.side_effect = subprocess.CalledProcessError(returncode=1, cmd=["ffprobe"], stderr=b"No such file")
+        with pytest.raises(FFmpegError) as exc_info:
+            probe("missing.mkv")
+        err = exc_info.value
+        assert err.returncode == 1
+        assert err.stderr == "No such file"
+        assert err.cmd is not None
+        assert err.cmd[0] == "ffprobe"
 
     @patch("ffmpeg_wrap._probe.subprocess.run")
     def test_probe_raises_on_malformed_json(self, mock_run):
@@ -572,18 +752,25 @@ class TestValidate:
     @patch("ffmpeg_wrap._probe.subprocess.run")
     def test_validate_raises_on_permission_error(self, mock_run):
         mock_run.side_effect = PermissionError("[Errno 13] Permission denied: '/usr/bin/ffprobe'")
-        with pytest.raises(FFmpegError, match="ffprobe could not be executed"):
+        with pytest.raises(FFmpegError, match="ffprobe could not be executed") as exc_info:
             validate("video.mkv")
+        assert exc_info.value.cmd is not None
+        assert exc_info.value.cmd[-1].endswith("video.mkv")
 
     def test_validate_raises_on_invalid_loglevel(self):
         with pytest.raises(ValueError, match="invalid loglevel"):
             validate("video.mkv", loglevel="warningg")
 
-    def test_validate_accepts_all_valid_loglevels(self):
+    @patch("ffmpeg_wrap._probe.subprocess.run")
+    def test_validate_accepts_all_valid_loglevels(self, mock_run):
+        mock_run.return_value = subprocess.CompletedProcess(args=[], returncode=0, stdout=b"", stderr=b"")
         valid = {"quiet", "panic", "fatal", "error", "warning", "info", "verbose", "debug", "trace"}
         for level in valid:
-            with contextlib.suppress(FFmpegError, OSError):
-                validate("video.mkv", loglevel=level)
+            # No ValueError (the validation guard accepts it) and the level
+            # reaches the ffprobe command after -v.
+            validate("video.mkv", loglevel=level)
+            cmd = mock_run.call_args[0][0]
+            assert cmd[cmd.index("-v") + 1] == level
 
     @patch("ffmpeg_wrap._probe.subprocess.run")
     def test_validate_extra_args_coerced_to_str(self, mock_run):
