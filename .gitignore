@@ -19,3 +19,7 @@ docs/
 .coverage
 .coverage.*
 htmlcov/
+
+# Downloaded real test media (fetched via `make download`)
+tests/file.mkv
+tests/file_2.mkv

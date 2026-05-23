@@ -73,3 +73,4 @@ ignore = [
 "__init__.py" = ["TID252", "F401", "A004"]
 "_builder.py" = ["A001", "A002", "A004"]
 "test_*.py" = ["T20", "ANN", "S", "ERA", "PLR", "ARG", "FBT", "SLF", "E402", "E501", "B007", "G"]
+"conftest.py" = ["ARG"]
