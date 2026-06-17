@@ -1,0 +1,61 @@
+site_name: ffmpeg-wrap
+site_description: Typed fluent FFmpeg/ffprobe wrapper with msgspec models
+site_url: https://gitbib.github.io/ffmpeg-wrap/
+repo_url: https://github.com/GitBib/ffmpeg-wrap
+repo_name: GitBib/ffmpeg-wrap
+
+theme:
+  name: material
+  features:
+    - navigation.sections
+    - navigation.top
+    - content.code.copy
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
+
+markdown_extensions:
+  - admonition
+  - pymdownx.highlight
+  - pymdownx.superfences
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - toc:
+      permalink: true
+
+plugins:
+  - search
+  - mkdocstrings:
+      handlers:
+        python:
+          options:
+            docstring_style: google
+            show_source: true
+            show_signature_annotations: true
+            separate_signature: true
+            merge_init_into_class: true
+            show_root_heading: true
+            members_order: source
+
+exclude_docs: |
+  plans/
+
+nav:
+  - Home: index.md
+  - Guide: guide.md
+  - Async API: async.md
+  - API Reference:
+      - Sync: reference/sync.md
+      - Async: reference/async.md

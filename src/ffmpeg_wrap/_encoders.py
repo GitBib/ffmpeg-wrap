@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 import subprocess
 
-from ._errors import FFmpegError
+from ffmpeg_wrap._errors import _build_ffmpeg_error
 
 logger = logging.getLogger("ffmpeg_wrap")
 
@@ -35,6 +35,11 @@ def _parse_encoders(output: str) -> frozenset[str]:
     return frozenset(names)
 
 
+def _build_encoders_cmd(ffmpeg_path: str = "ffmpeg") -> list[str]:
+    """Build the ``ffmpeg -encoders`` command (pure; shared by sync/async)."""
+    return [ffmpeg_path, "-hide_banner", "-encoders"]
+
+
 def encoders(ffmpeg_path: str = "ffmpeg") -> frozenset[str]:
     """Return the set of encoder names reported by ``ffmpeg -encoders``.
 
@@ -49,19 +54,28 @@ def encoders(ffmpeg_path: str = "ffmpeg") -> frozenset[str]:
 
     Raises:
         FFmpegError: If ffmpeg cannot be run or exits non-zero.
+
+    Example:
+        ```python
+        import ffmpeg_wrap as ffmpeg
+
+        available = ffmpeg.encoders()
+        print("libx264" in available)   # True if ffmpeg was compiled with it
+        print(sorted(available)[:5])    # first five encoder names alphabetically
+        ```
     """
     cached = _ENCODERS_CACHE.get(ffmpeg_path)
     if cached is not None:
         return cached
 
-    cmd = [ffmpeg_path, "-hide_banner", "-encoders"]
+    cmd = _build_encoders_cmd(ffmpeg_path)
     try:
         result = subprocess.run(cmd, capture_output=True, check=True, text=True)
     except subprocess.CalledProcessError as e:
         stderr_text = e.stderr if isinstance(e.stderr, str) else None
         err_msg = stderr_text or str(e)
         logger.error(f"ffmpeg -encoders failed: {err_msg}")
-        raise FFmpegError(
+        raise _build_ffmpeg_error(
             f"ffmpeg -encoders error: {err_msg}",
             stderr=stderr_text,
             returncode=e.returncode,
@@ -69,7 +83,7 @@ def encoders(ffmpeg_path: str = "ffmpeg") -> frozenset[str]:
         ) from e
     except OSError as e:
         logger.error(f"ffmpeg could not be executed: {e}")
-        raise FFmpegError(f"ffmpeg could not be executed: {e}", cmd=cmd) from e
+        raise _build_ffmpeg_error(f"ffmpeg could not be executed: {e}", cmd=cmd) from e
 
     parsed = _parse_encoders(result.stdout)
     _ENCODERS_CACHE[ffmpeg_path] = parsed
@@ -84,10 +98,21 @@ def has_encoder(name: str, ffmpeg_path: str = "ffmpeg") -> bool:
         ffmpeg_path: Path to the ffmpeg executable.
 
     Returns:
-        True iff ``name`` appears in :func:`encoders`.
+        ``True`` iff ``name`` appears in :func:`encoders`.
 
     Raises:
         FFmpegError: If ffmpeg cannot be run or exits non-zero.
+
+    Example:
+        ```python
+        import ffmpeg_wrap as ffmpeg
+
+        if ffmpeg.has_encoder("h264_nvenc"):
+            codec = "h264_nvenc"
+        else:
+            codec = "libx264"
+        ffmpeg.input("in.mkv").output("out.mp4").codec("v", codec).run()
+        ```
     """
     return name in encoders(ffmpeg_path)
 

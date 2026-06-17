@@ -13,7 +13,8 @@ wheels/
 .*/
 !.github/
 
-docs/
+# MkDocs build output
+site/
 
 # Coverage artifacts
 .coverage

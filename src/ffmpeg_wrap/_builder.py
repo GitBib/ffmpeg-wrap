@@ -1,24 +1,65 @@
 from __future__ import annotations
 
-import collections
 import locale
 import logging
 import os
 import subprocess
-import sys
+import sys  # noqa: F401  # re-exported so tests can patch ``_builder.sys.stderr`` (the shared TeePump reads ``sys.stderr``)
 import threading
 from typing import Any, Literal, overload
 
-from ._errors import FFmpegError
-from ._probe import Stream
+from ffmpeg_wrap import _textio
+from ffmpeg_wrap._errors import FFmpegError, _build_ffmpeg_error
+from ffmpeg_wrap._probe import Stream
+from ffmpeg_wrap._textio import TeePump, decode_text
 
 logger = logging.getLogger("ffmpeg_wrap")
 
 
 class FFmpeg:
-    """A fluent interface wrapper for ffmpeg."""
+    """A fluent interface wrapper for ffmpeg.
+
+    Build an ffmpeg command incrementally via method chaining and execute it
+    with :meth:`run` (sync) or :meth:`arun` (async). Every builder method
+    returns ``self`` so calls can be chained in a single expression.
+
+    Args:
+        ffmpeg_path: Path to the ffmpeg executable. Defaults to ``"ffmpeg"``,
+            which relies on the executable being present on ``PATH``. Pass an
+            absolute path to pin a specific build.
+
+    Example:
+        ```python
+        from ffmpeg_wrap import input
+
+        out, _ = (
+            input("in.mkv")
+            .output("out.mp4")
+            .codec("v", "libx264")
+            .codec("a", "aac")
+            .overwrite_output()
+            .run(capture_stderr=True, text=True)
+        )
+        ```
+    """
 
     def __init__(self, ffmpeg_path: str = "ffmpeg") -> None:
+        """Initialise the FFmpeg command builder.
+
+        Args:
+            ffmpeg_path: Path to the ffmpeg executable. Defaults to
+                ``"ffmpeg"`` (resolved from ``PATH``). Pass an absolute path
+                to target a specific ffmpeg build, e.g.
+                ``"/usr/local/bin/ffmpeg"``.
+
+        Example:
+            ```python
+            from ffmpeg_wrap import FFmpeg
+
+            ff = FFmpeg(ffmpeg_path="/usr/local/bin/ffmpeg")
+            ff.input("in.mkv").output("out.mp4").run()
+            ```
+        """
         self._inputs: list[dict[str, Any]] = []
         self._outputs: list[dict[str, Any]] = []
         self._global_args: list[str] = []
@@ -31,6 +72,15 @@ class FFmpeg:
 
         Returns:
             The command as a list of strings.
+
+        Example:
+            ```python
+            from ffmpeg_wrap import input
+
+            cmd = input("in.mkv").output("out.mp4").codec("v", "copy").compile()
+            # ['ffmpeg', '-i', '/abs/path/in.mkv', '-c:v', 'copy', 'out.mp4']
+            print(cmd)
+            ```
         """
         cmd = [self._ffmpeg_path]
 
@@ -62,6 +112,14 @@ class FFmpeg:
 
         Returns:
             Self for chaining.
+
+        Example:
+            ```python
+            from ffmpeg_wrap import FFmpeg
+
+            ff = FFmpeg().input("clip.mkv", ss=30, t=60)
+            # Emits: -ss 30 -t 60 -i clip.mkv
+            ```
         """
         self._inputs.append({"filename": os.fsdecode(filename), "kwargs": kwargs})
         return self
@@ -75,6 +133,13 @@ class FFmpeg:
 
         Returns:
             Self for chaining.
+
+        Example:
+            ```python
+            from ffmpeg_wrap import input
+
+            input("in.mkv").output("out.mp4", c="copy", ac=2)
+            ```
         """
         self._outputs.append({"filename": os.fsdecode(filename), "kwargs": kwargs})
         return self
@@ -111,6 +176,15 @@ class FFmpeg:
 
         Returns:
             Self for chaining.
+
+        Example:
+            ```python
+            from ffmpeg_wrap import input, probe
+
+            result = probe("in.mkv")
+            video = next(s for s in result.streams if s.is_video)
+            input("in.mkv").output("out.mkv").map("0:a", video)
+            ```
         """
         tokens = [spec.map_specifier() if isinstance(spec, Stream) else str(spec) for spec in specs]
         self._append_output_list("map", tokens)
@@ -126,6 +200,14 @@ class FFmpeg:
 
         Returns:
             Self for chaining.
+
+        Example:
+            ```python
+            from ffmpeg_wrap import input
+
+            # Map first video and second audio stream from input 0
+            input("in.mkv").output("out.mkv").map_stream("v", 0).map_stream("a", 1)
+            ```
         """
         self._append_output_list("map", [f"{input}:{kind}:{ordinal}"])
         return self
@@ -152,6 +234,14 @@ class FFmpeg:
 
         Returns:
             Self for chaining.
+
+        Example:
+            ```python
+            from ffmpeg_wrap import FFmpeg
+
+            ff = FFmpeg().input("in.mkv").hwaccel("cuda").output("out.mp4")
+            # Emits: -hwaccel cuda -i in.mkv out.mp4
+            ```
         """
         self._set_input_option("hwaccel", name)
         return self
@@ -178,6 +268,13 @@ class FFmpeg:
 
         Returns:
             Self for chaining.
+
+        Example:
+            ```python
+            from ffmpeg_wrap import input
+
+            input("in.mkv").output("out.mp4").codec("v", "libx264").codec("a", "aac")
+            ```
         """
         self._set_output_option(f"c:{kind}", name)
         return self
@@ -194,6 +291,13 @@ class FFmpeg:
 
         Returns:
             Self for chaining.
+
+        Example:
+            ```python
+            from ffmpeg_wrap import input
+
+            input("in.mkv").output("out.mp4").codec("v", "libx264").bitrate("v", "2M")
+            ```
         """
         self._set_output_option(f"b:{kind}", value)
         return self
@@ -209,6 +313,13 @@ class FFmpeg:
 
         Returns:
             Self for chaining.
+
+        Example:
+            ```python
+            from ffmpeg_wrap import input
+
+            input("in.mkv").output("out.mp3").codec("a", "libmp3lame").quality("a", 2)
+            ```
         """
         self._set_output_option(f"q:{kind}", value)
         return self
@@ -223,6 +334,13 @@ class FFmpeg:
 
         Returns:
             Self for chaining.
+
+        Example:
+            ```python
+            from ffmpeg_wrap import input
+
+            input("in.mkv").output("out.mkv").audio_filter("loudnorm")
+            ```
         """
         self._set_output_option("filter:a", chain)
         return self
@@ -237,6 +355,13 @@ class FFmpeg:
 
         Returns:
             Self for chaining.
+
+        Example:
+            ```python
+            from ffmpeg_wrap import input
+
+            input("in.mkv").output("out.mp4").video_filter("scale=1280:-2")
+            ```
         """
         self._set_output_option("filter:v", chain)
         return self
@@ -253,28 +378,50 @@ class FFmpeg:
 
         Returns:
             Self for chaining.
+
+        Example:
+            ```python
+            from ffmpeg_wrap import input
+
+            # Extract audio only: suppress video and subtitle streams
+            input("in.mkv").output("out.aac").flag("vn", "sn")
+            ```
         """
         for name in names:
             self._set_output_option(name, True)
         return self
 
     def overwrite_output(self) -> FFmpeg:
-        """Add the -y flag to overwrite output files.
+        """Add the ``-y`` flag to overwrite output files without prompting.
 
         Returns:
             Self for chaining.
+
+        Example:
+            ```python
+            from ffmpeg_wrap import input
+
+            input("in.mkv").output("out.mp4").overwrite_output().run()
+            ```
         """
         self._overwrite = True
         return self
 
     def global_args(self, *args: str) -> FFmpeg:
-        """Add global arguments.
+        """Add raw global arguments emitted before input options.
 
         Args:
-            *args: Global arguments.
+            *args: Global arguments (e.g. ``"-nostdin"``, ``"-benchmark"``).
 
         Returns:
             Self for chaining.
+
+        Example:
+            ```python
+            from ffmpeg_wrap import input
+
+            input("in.mkv").output("out.mp4").global_args("-nostdin", "-benchmark")
+            ```
         """
         self._global_args.extend(args)
         return self
@@ -286,6 +433,13 @@ class FFmpeg:
 
         Returns:
             Self for chaining.
+
+        Example:
+            ```python
+            from ffmpeg_wrap import input
+
+            input("in.mkv").output("out.mp4").hide_banner().run()
+            ```
         """
         self._global_args.append("-hide_banner")
         return self
@@ -300,6 +454,13 @@ class FFmpeg:
 
         Returns:
             Self for chaining.
+
+        Example:
+            ```python
+            from ffmpeg_wrap import input
+
+            input("in.mkv").output("out.mp4").loglevel("error").run()
+            ```
         """
         self._global_args.extend(["-loglevel", level])
         return self
@@ -318,6 +479,17 @@ class FFmpeg:
 
         Returns:
             Self for chaining.
+
+        Example:
+            ```python
+            from ffmpeg_wrap import input
+
+            (
+                input("in.mkv")
+                .filter_complex("[0:v]split=2[a][b];[a]scale=640:-2[out]")
+                .output("out.mp4", map="[out]")
+            )
+            ```
         """
         self._filter_graph_args = ["-filter_complex", graph_str]
         return self
@@ -334,6 +506,13 @@ class FFmpeg:
 
         Returns:
             Self for chaining.
+
+        Example:
+            ```python
+            from ffmpeg_wrap import input
+
+            input("in.mkv").filter_complex_script("graph.txt").output("out.mp4").run()
+            ```
         """
         self._filter_graph_args = ["-filter_complex_script", os.fsdecode(path)]
         return self
@@ -379,6 +558,21 @@ class FFmpeg:
 
         Raises:
             FFmpegError: If ffmpeg fails.
+
+        Example:
+            ```python
+            import ffmpeg_wrap as ffmpeg
+
+            try:
+                _, stderr = (
+                    ffmpeg.input("in.mkv")
+                    .output("out.mp4")
+                    .overwrite_output()
+                    .run(capture_stderr=True, text=True)
+                )
+            except ffmpeg.FFmpegError as e:
+                print(e.returncode, e.stderr)
+            ```
         """
         cmd = self.compile()
 
@@ -413,7 +607,7 @@ class FFmpeg:
                 stderr_text = e.stderr.decode("utf-8", errors="replace")
             err_msg = stderr_text or str(e)
             logger.error(f"FFmpeg command failed: {err_msg}")
-            raise FFmpegError(
+            raise _build_ffmpeg_error(
                 f"ffmpeg error: {err_msg}",
                 stderr=stderr_text,
                 returncode=e.returncode,
@@ -421,26 +615,79 @@ class FFmpeg:
             ) from e
         except OSError as e:
             logger.error(f"ffmpeg could not be executed: {e}")
-            raise FFmpegError(f"ffmpeg could not be executed: {e}", cmd=cmd) from e
+            raise _build_ffmpeg_error(f"ffmpeg could not be executed: {e}", cmd=cmd) from e
 
-    # Maximum stderr tail retained for ``FFmpegError`` (ffmpeg's diagnostics
-    # land at the end of the stream, so a bounded tail keeps memory flat on
-    # long jobs while still capturing the actionable error text).
-    _STDERR_TAIL_BYTES = 256 * 1024
+    @overload
+    async def arun(
+        self,
+        capture_stdout: bool = ...,
+        capture_stderr: bool = ...,
+        *,
+        text: Literal[False] = ...,
+    ) -> tuple[bytes | None, bytes | None]: ...
 
-    @staticmethod
-    def _decode_text(data: bytes, encoding: str) -> str:
-        """Decode tee-path bytes the way ``subprocess.run(text=True)`` returns text.
+    @overload
+    async def arun(
+        self,
+        capture_stdout: bool = ...,
+        capture_stderr: bool = ...,
+        *,
+        text: Literal[True],
+    ) -> tuple[str | None, str | None]: ...
 
-        Mirrors subprocess's universal-newline translation (``\\r\\n`` and
-        ``\\r`` collapse to ``\\n``) so the returned stdout and
-        ``FFmpegError.stderr`` have the same shape regardless of which ``run()``
-        path produced them. Decoding stays lenient (``errors="replace"``)
-        rather than subprocess's strict default: a stray byte must never turn a
-        finished run — or the error report for a failed one — into a
-        ``UnicodeDecodeError``.
+    async def arun(
+        self,
+        capture_stdout: bool = False,
+        capture_stderr: bool = False,
+        *,
+        text: bool = False,
+    ) -> tuple[bytes | None, bytes | None] | tuple[str | None, str | None]:
+        """Build and execute the FFmpeg command asynchronously.
+
+        Async mirror of :meth:`run`, powered by AnyIO via the optional
+        ``[async]`` extra. The return contract is identical to :meth:`run`.
+        Importing this module never imports anyio — the dependency is pulled in
+        lazily here, so ``ffmpeg_wrap.aio`` (and thus anyio) is only loaded when
+        ``arun`` is actually awaited.
+
+        Args:
+            capture_stdout: Whether to capture stdout.
+            capture_stderr: Whether to capture stderr.
+            text: When True, decode stdout/stderr (and ``FFmpegError.stderr``)
+                leniently as text using the platform default encoding.
+
+        Returns:
+            Tuple of (stdout, stderr); see :meth:`run`.
+
+        Raises:
+            FFmpegError: If ffmpeg fails or cannot be executed.
+            ImportError: If the optional ``[async]`` extra is not installed.
+
+        Example:
+            ```python
+            import anyio
+            from ffmpeg_wrap import input
+
+            async def main():
+                _, stderr = await (
+                    input("in.mkv")
+                    .output("out.mp4")
+                    .overwrite_output()
+                    .arun(capture_stderr=True, text=True)
+                )
+
+            anyio.run(main)
+            ```
         """
-        return data.decode(encoding, errors="replace").replace("\r\n", "\n").replace("\r", "\n")
+        from ffmpeg_wrap import aio
+
+        return await aio.run(self, capture_stdout, capture_stderr, text=text)
+
+    # Thin re-exports of the ``_textio`` versions so existing call sites and
+    # any tests referencing ``FFmpeg._decode_text`` / ``FFmpeg._STDERR_TAIL_BYTES``
+    # keep working. The single source of truth lives in ``_textio``.
+    _STDERR_TAIL_BYTES = _textio.STDERR_TAIL_BYTES
+    _decode_text = staticmethod(decode_text)
 
     @staticmethod
     def _run_tee(cmd: list[str], stdout_dest: int | None, text: bool) -> bytes | str | None:
@@ -451,45 +698,25 @@ class FFmpeg:
         carriage-return-terminated updates (``frame=...\\r``) rather than
         newline-terminated lines, so a line-oriented read would withhold all of
         it until EOF; chunked reads preserve the live progress of a bare
-        ``run()``. Only a bounded tail of stderr is retained, and it is decoded
-        and joined solely on the failure path — successful runs keep memory
-        flat. On a non-zero exit raises ``CalledProcessError`` carrying the
-        collected stderr (and stdout) so the caller can build ``FFmpegError``.
+        ``run()``. Only a bounded tail of stderr is retained (in the shared
+        :class:`~ffmpeg_wrap._textio.TeePump`), and it is decoded and joined
+        solely on the failure path — successful runs keep memory flat. On a
+        non-zero exit raises ``CalledProcessError`` carrying the collected
+        stderr (and stdout) so the caller can build ``FFmpegError``.
         """
         encoding = locale.getpreferredencoding(False)
-        # ``sys.stderr`` is normally a text wrapper over a binary ``.buffer``,
-        # which takes the raw byte chunks directly. When the active
-        # ``sys.stderr`` is text-only (no ``.buffer`` — e.g. a capturing
-        # wrapper) or ``None``, fall back and decode per chunk so the live tee
-        # is preserved instead of silently dropped on a bytes-to-text write.
-        buffer = getattr(sys.stderr, "buffer", None)
-        if buffer is not None:
-            sink, sink_is_text = buffer, False
-        else:
-            sink, sink_is_text = sys.stderr, True
-        tail: collections.deque[bytes] = collections.deque()
-        tail_len = 0
+        pump_state = TeePump(encoding)
 
         def _pump(stream: Any) -> None:
-            nonlocal tail_len
+            # Only the read loop lives here; per-chunk forwarding + bounded-tail
+            # bookkeeping are owned by the shared ``TeePump`` (same code the
+            # async tee task feeds).
             reader = stream.read1 if hasattr(stream, "read1") else stream.read
             while True:
                 chunk = reader(65536)
                 if not chunk:
                     break
-                try:
-                    # Forward raw bytes (or a lenient per-chunk decode for a
-                    # text-only sink) WITHOUT newline translation, so ffmpeg's
-                    # ``\r`` progress updates still overwrite in place on the
-                    # terminal rather than scrolling.
-                    sink.write(chunk.decode(encoding, errors="replace") if sink_is_text else chunk)
-                    sink.flush()
-                except (OSError, ValueError, TypeError, AttributeError):
-                    pass
-                tail.append(chunk)
-                tail_len += len(chunk)
-                while tail_len > FFmpeg._STDERR_TAIL_BYTES and len(tail) > 1:
-                    tail_len -= len(tail.popleft())
+                pump_state.feed(chunk)
             stream.close()
 
         with subprocess.Popen(cmd, stdout=stdout_dest, stderr=subprocess.PIPE) as process:
@@ -500,13 +727,13 @@ class FFmpeg:
             pump.join()
 
         # The returned stdout and ``FFmpegError.stderr`` mirror
-        # ``subprocess.run(text=True)`` (see ``_decode_text``): platform-default
+        # ``subprocess.run(text=True)`` (see ``decode_text``): platform-default
         # encoding with universal-newline translation, leniently decoded.
         if text and isinstance(stdout_data, bytes):
-            stdout_data = FFmpeg._decode_text(stdout_data, encoding)
+            stdout_data = decode_text(stdout_data, encoding)
         if process.returncode:
-            stderr_bytes = b"".join(tail)
-            stderr_data: bytes | str = FFmpeg._decode_text(stderr_bytes, encoding) if text else stderr_bytes
+            stderr_bytes = pump_state.tail_bytes()
+            stderr_data: bytes | str = decode_text(stderr_bytes, encoding) if text else stderr_bytes
             raise subprocess.CalledProcessError(process.returncode, cmd, output=stdout_data, stderr=stderr_data)
         return stdout_data
 
@@ -531,13 +758,26 @@ def _convert_arg(key: str, value: Any) -> list[str]:
 def input(filename: str | os.PathLike[str], ffmpeg_path: str = "ffmpeg", **kwargs: Any) -> FFmpeg:
     """Start a new FFmpeg chain with an input file.
 
+    This is the recommended entry point for building a fluent chain. It creates
+    a fresh :class:`FFmpeg` instance and calls :meth:`~FFmpeg.input` on it.
+
     Args:
         filename: Input file path or PathLike object.
-        ffmpeg_path: Path to the ffmpeg executable.
-        **kwargs: Input arguments.
+        ffmpeg_path: Path to the ffmpeg executable. Defaults to ``"ffmpeg"``
+            (resolved from ``PATH``).
+        **kwargs: FFmpeg input options passed through to the input slot
+            (e.g. ``ss=30``, ``t=60``).
 
     Returns:
-        A new FFmpeg wrapper instance with the input added.
+        A new :class:`FFmpeg` instance with the input added, ready for further
+        chaining.
+
+    Example:
+        ```python
+        from ffmpeg_wrap import input
+
+        input("in.mkv", ss=30, t=60).output("clip.mp4").codec("v", "copy").run()
+        ```
     """
     instance = FFmpeg(ffmpeg_path=ffmpeg_path)
     return instance.input(filename, **kwargs)
