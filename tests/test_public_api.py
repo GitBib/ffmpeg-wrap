@@ -57,3 +57,14 @@ def test_all_exports_match():
         "filter_arg_escape",
     }
     assert set(ffmpeg.__all__) == expected
+
+
+def test_aio_not_in_all():
+    """``aio`` must NOT be in ``__all__``.
+
+    Listing it would make ``from ffmpeg_wrap import *`` eagerly import the
+    anyio-backed submodule, breaking wildcard import when the optional
+    ``[async]`` extra is not installed. ``import ffmpeg_wrap.aio`` and
+    ``from ffmpeg_wrap import aio`` still work via the lazy ``__getattr__``.
+    """
+    assert "aio" not in ffmpeg.__all__

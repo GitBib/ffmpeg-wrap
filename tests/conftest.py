@@ -29,6 +29,20 @@ def pytest_configure(config: pytest.Config) -> None:
     )
 
 
+@pytest.fixture(params=["asyncio", "trio"], scope="module")
+def anyio_backend(request: pytest.FixtureRequest) -> str:
+    """Parametrize async tests over both AnyIO backends (asyncio and trio).
+
+    Module-scoped per AnyIO's requirement; async fixtures depending on it must
+    therefore be function- or module-scoped (never session-scoped). The trio
+    leg is skipped when trio is not installed so the suite still runs without
+    the ``[async]`` extra / dev group.
+    """
+    if request.param == "trio":
+        pytest.importorskip("trio")
+    return request.param
+
+
 @pytest.fixture(scope="session")
 def ffmpeg_available() -> None:
     """Skip the test unless both ffmpeg and ffprobe are on PATH."""

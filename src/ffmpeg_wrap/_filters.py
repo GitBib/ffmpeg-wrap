@@ -20,9 +20,16 @@ def filter_arg_escape(value: str) -> str:
     the filter-option parser and splits the value, so the backslash escaping is
     required as well. The result parses back to the original ``value``.
 
-    Typical use is building a ``subtitles=`` (or any path-bearing) filter::
+    Typical use is building a ``subtitles=`` (or any path-bearing) filter.
 
+    Example:
+        ```python
+        from ffmpeg_wrap import filter_arg_escape, input
+
+        path = "/media/My Film: Director's Cut/subs.srt"
         graph = f"subtitles={filter_arg_escape(path)}"
+        input("in.mkv").filter_complex(graph).output("out.mp4").run()
+        ```
 
     Args:
         value: The raw string to escape (e.g. a filesystem path).

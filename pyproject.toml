@@ -1,6 +1,6 @@
 [project]
 name = "ffmpeg-wrap"
-version = "0.3.0"
+version = "0.4.0"
 description = "Typed fluent FFmpeg/ffprobe wrapper with msgspec models"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -9,6 +9,8 @@ authors = [{ name = "GitBib" }]
 keywords = ["ffmpeg", "ffprobe", "video", "audio", "media", "wrapper", "msgspec"]
 classifiers = [
     "Development Status :: 4 - Beta",
+    "Framework :: AsyncIO",
+    "Framework :: Trio",
     "Intended Audience :: Developers",
     "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3.10",
@@ -24,14 +26,26 @@ dependencies = [
     "msgspec>=0.21.0",
 ]
 
+[project.optional-dependencies]
+async = ["anyio>=4.0"]
+
 [project.urls]
 Homepage = "https://github.com/GitBib/ffmpeg-wrap"
+Documentation = "https://gitbib.github.io/ffmpeg-wrap/"
 Repository = "https://github.com/GitBib/ffmpeg-wrap"
 Issues = "https://github.com/GitBib/ffmpeg-wrap/issues"
 
 [dependency-groups]
 dev = [
     "pytest>=8.0",
+    "pytest-timeout>=2.3",
+    "anyio>=4.0",
+    "trio>=0.25",
+]
+docs = [
+    "mkdocs>=1.6",
+    "mkdocs-material>=9.5",
+    "mkdocstrings[python]>=0.27",
 ]
 
 [build-system]
@@ -43,6 +57,11 @@ packages = ["src/ffmpeg_wrap"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+anyio_mode = "auto"
+# Backstop against a hung subprocess/async test (the in-test ``fail_after`` guards
+# fire first at lower values); the thread method works cross-platform, incl. Windows.
+timeout = 300
+timeout_method = "thread"
 
 [tool.ruff]
 line-length = 120

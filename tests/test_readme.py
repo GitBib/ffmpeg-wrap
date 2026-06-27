@@ -5,6 +5,10 @@ argv (or escaped string) shown in the README, so the docs cannot drift away
 from the shipped behavior.
 """
 
+import inspect
+
+import pytest
+
 import ffmpeg_wrap as ffmpeg
 
 
@@ -169,3 +173,64 @@ def test_error_handling_attributes_documented():
     assert err.returncode == 1
     assert err.stderr == "boom"
     assert err.cmd == ["ffmpeg"]
+
+
+# --- Async API snippets ---------------------------------------------------
+#
+# The README "Async API" examples spawn real ffmpeg/ffprobe inside ``async def
+# main()`` bodies driven by ``anyio.run(...)``. We do NOT execute them here (no
+# event loop, no ffmpeg in the unit harness). Instead, matching this file's
+# convention, we validate the *static* contract the snippets rely on: the
+# documented builder chain still compiles to the expected argv, and the
+# ``aio``/``arun`` API surface exists with the documented signatures. The
+# anyio-dependent checks are guarded with ``importorskip`` so the suite still
+# passes without the optional ``[async]`` extra installed.
+
+
+def test_async_builder_chain_snippet_compiles():
+    """The README ``arun()`` example chain compiles to the documented argv.
+
+    The README awaits this exact chain; here we assert its synchronous
+    ``compile()`` argv so the documented command cannot drift.
+    """
+    cmd = ffmpeg.input("input.mkv").output("output.mp4", c="copy").overwrite_output().compile()
+    assert cmd == [
+        "ffmpeg",
+        "-y",
+        "-i",
+        "input.mkv",
+        "-c",
+        "copy",
+        "output.mp4",
+    ]
+
+
+def test_readme_async_imports_are_importable():
+    """``from ffmpeg_wrap import input`` and ``aio`` resolve as the README shows."""
+    pytest.importorskip("anyio")
+    from ffmpeg_wrap import aio
+
+    # README documents ``from ffmpeg_wrap import input`` for the async chain;
+    # access via the module to avoid shadowing the builtin in this test file.
+    assert callable(ffmpeg.input)
+    # Documented coroutine mirrors exist on the aio submodule.
+    for name in ("probe", "validate", "run", "encoders", "has_encoder"):
+        fn = getattr(aio, name)
+        assert inspect.iscoroutinefunction(fn), name
+
+
+def test_readme_arun_is_documented_coroutine():
+    """``FFmpeg.arun`` exists as a coroutine with the documented kwargs."""
+    pytest.importorskip("anyio")
+    builder = ffmpeg.input("input.mkv").output("output.mp4", c="copy")
+    assert inspect.iscoroutinefunction(builder.arun)
+    params = inspect.signature(builder.arun).parameters
+    assert set(params) == {"capture_stdout", "capture_stderr", "text"}
+
+
+def test_readme_capacity_limiter_pattern_available():
+    """The highload snippet's anyio primitives exist as documented."""
+    anyio = pytest.importorskip("anyio")
+    assert hasattr(anyio, "CapacityLimiter")
+    assert hasattr(anyio, "create_task_group")
+    assert hasattr(anyio, "run")

@@ -22,7 +22,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - name: Check out repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7.0.0
 
       - name: Install ffmpeg (Ubuntu)
         if: matrix.os == 'ubuntu-latest'
@@ -44,7 +44,7 @@ jobs:
 
       - name: Install uv
         id: setup-uv
-        uses: astral-sh/setup-uv@v8.0.0
+        uses: astral-sh/setup-uv@v8.2.0
         with:
           version: latest
           python-version: ${{ matrix.python-version }}
@@ -65,10 +65,10 @@ jobs:
         python-version: ['3.10', '3.11', '3.12', '3.13', '3.14']
     steps:
       - name: Check out repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7.0.0
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v8.0.0
+        uses: astral-sh/setup-uv@v8.2.0
         with:
           version: latest
           python-version: ${{ matrix.python-version }}
@@ -76,3 +76,9 @@ jobs:
 
       - name: Import ffmpeg_wrap without dev dependencies
         run: uv run --no-dev python -c "import ffmpeg_wrap; print(ffmpeg_wrap.__version__)"
+
+      - name: Core import stays AnyIO-free (incl. wildcard import)
+        run: uv run --no-dev python -c "import ffmpeg_wrap; from ffmpeg_wrap import *; import sys; assert 'anyio' not in sys.modules, 'anyio must not be imported by the core package'; print('core import is anyio-free')"
+
+      - name: Import async API with the [async] extra
+        run: uv run --no-dev --extra async python -c "import ffmpeg_wrap.aio; from ffmpeg_wrap import aio; print('aio import ok:', aio.run.__name__)"
