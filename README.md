@@ -80,3 +80,14 @@ Full documentation, including guides and the complete API reference, is hosted a
   asynchronous mirror, backend choice (asyncio or trio), and bounding concurrency.
 - **[API Reference](https://gitbib.github.io/ffmpeg-wrap/reference/sync/)** — the
   auto-generated reference for every public function, builder method, and model.
+
+## Development
+
+Install the locked development environment and run the complete local checks:
+
+```bash
+uv sync --all-extras --dev
+uv run ty check
+uv run pytest
+prek run --all-files
+```

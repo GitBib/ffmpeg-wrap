@@ -71,6 +71,16 @@ class TestAioRunCapture:
 
 
 class TestAioRunTee:
+    async def test_anyio_task_handle_result_contract(self) -> None:
+        async def collect() -> bytes:
+            await anyio.lowlevel.checkpoint()
+            return b"collected"
+
+        async with anyio.create_task_group() as task_group:
+            handle: anyio.TaskHandle[bytes] = task_group.start_soon(collect, name="test collector")
+
+        assert handle.return_value == b"collected"
+
     async def test_tee_success(self, real_file: Path, tmp_path: Path) -> None:
         out = tmp_path / "out.mp4"
         stdout, stderr = await aio.run(_transcode_chain(real_file, out))

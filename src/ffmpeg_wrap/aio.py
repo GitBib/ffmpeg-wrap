@@ -16,9 +16,9 @@ from __future__ import annotations
 
 import locale
 import logging
-import os
+from os import PathLike
 from subprocess import PIPE, CalledProcessError
-from typing import TYPE_CHECKING, Any, Literal, overload
+from typing import TYPE_CHECKING, Literal, overload
 
 try:
     import anyio
@@ -38,6 +38,8 @@ from ffmpeg_wrap._textio import TeePump, decode_text
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+
+    from anyio.abc import ByteReceiveStream
 
     from ffmpeg_wrap._builder import FFmpeg
 
@@ -67,7 +69,7 @@ def _decode_error_stderr(stderr: bytes | None, encoding: str, *, text: bool) -> 
     return stderr.decode("utf-8", errors="replace")
 
 
-async def probe(filename: str | os.PathLike[str], ffprobe_path: str = "ffprobe") -> ProbeResult:
+async def probe(filename: str | PathLike[str], ffprobe_path: str = "ffprobe") -> ProbeResult:
     """Run ffprobe asynchronously and return typed output.
 
     Async mirror of :func:`ffmpeg_wrap.probe`. Reuses the shared command builder
@@ -120,7 +122,7 @@ async def probe(filename: str | os.PathLike[str], ffprobe_path: str = "ffprobe")
 
 
 async def validate(
-    filename: str | os.PathLike[str],
+    filename: str | PathLike[str],
     ffprobe_path: str = "ffprobe",
     loglevel: str = "warning",
     extra_args: tuple[str, ...] = (),
@@ -132,7 +134,7 @@ async def validate(
     ``ValueError`` exactly as in the sync path.
 
     Args:
-        filename: Path to the media file (str or PathLike).
+        filename: Path to the media file or special ffmpeg input string.
         ffprobe_path: Path to the ffprobe executable.
         loglevel: Value passed to ffprobe's ``-v`` flag (default ``"warning"``).
         extra_args: Additional raw arguments forwarded to ffprobe before the
@@ -406,16 +408,13 @@ async def _run_tee(
     """
     encoding = locale.getpreferredencoding(False)
     pump = TeePump(encoding)
-    stdout_buf = bytearray()
-
     try:
         process = await anyio.open_process(cmd, stdout=stdout_dest, stderr=PIPE, stdin=None)
     except OSError as e:
         logger.error(f"ffmpeg could not be executed: {e}")
         raise _build_ffmpeg_error(f"ffmpeg could not be executed: {e}", cmd=cmd) from e
 
-    async def _drain(stream: Any, on_chunk: Callable[[bytes], object]) -> None:
-        # Shared read loop for both pipes — only the per-chunk action differs.
+    async def _drain(stream: ByteReceiveStream | None, on_chunk: Callable[[bytes], object]) -> None:
         # ``ClosedResourceError`` is caught alongside ``EndOfStream`` so a read
         # cancelled by task-group teardown never masks the original error.
         if stream is None:
@@ -427,19 +426,19 @@ async def _run_tee(
                 break
             on_chunk(chunk)
 
+    async def _collect(stream: ByteReceiveStream | None) -> bytes:
+        buffer = bytearray()
+        await _drain(stream, buffer.extend)
+        return bytes(buffer)
+
+    stdout_handle: anyio.TaskHandle[bytes] | None = None
     async with process, anyio.create_task_group() as tg:
-        tg.start_soon(_drain, process.stderr, pump.feed)
+        tg.start_soon(_drain, process.stderr, pump.feed, name="ffmpeg-wrap stderr tee")
         if stdout_dest is not None:
-            tg.start_soon(_drain, process.stdout, stdout_buf.extend)
-        tg.start_soon(process.wait)
+            stdout_handle = tg.start_soon(_collect, process.stdout, name="ffmpeg-wrap stdout collector")
+        await process.wait()
 
-    stdout_data: bytes | None = bytes(stdout_buf) if stdout_dest is not None else None
-
-    stdout_result: bytes | str | None
-    if text and stdout_data is not None:
-        stdout_result = decode_text(stdout_data, encoding)
-    else:
-        stdout_result = stdout_data
+    stdout_data = stdout_handle.return_value if stdout_handle is not None else None
 
     if process.returncode:
         # Match sync ``_run_tee`` + ``run`` error handling: text=False decodes
@@ -459,4 +458,6 @@ async def _run_tee(
             cmd=cmd,
         )
 
-    return stdout_result, None
+    if text and stdout_data is not None:
+        return decode_text(stdout_data, encoding), None
+    return stdout_data, None

@@ -1,7 +1,7 @@
 import logging
-import os
 import subprocess
 import sys
+from os import PathLike
 from pathlib import Path
 
 if sys.version_info >= (3, 11):
@@ -154,18 +154,17 @@ def _is_special_input(filename: str) -> bool:
     return False
 
 
-def _resolve_input(filename: str | os.PathLike[str]) -> str:
+def _resolve_input(filename: str | PathLike[str]) -> str:
     """Resolve a filename argument to the string passed to ffprobe/ffmpeg.
 
     PathLike objects are always treated as filesystem paths and resolved to
-    absolute form.  Plain strings are checked for ffmpeg special-input syntax
+    absolute form. Plain strings are checked for ffmpeg special-input syntax
     (protocols, pipe:, URLs, "-") and passed through unchanged when detected;
     otherwise they are resolved as filesystem paths.
     """
-    filename_str = os.fsdecode(filename)
-    if isinstance(filename, os.PathLike) or not _is_special_input(filename_str):
-        return str(Path(filename_str).resolve())
-    return filename_str
+    if isinstance(filename, str) and _is_special_input(filename):
+        return filename
+    return str(Path(filename).resolve())
 
 
 class Stream(msgspec.Struct):
@@ -527,7 +526,7 @@ def _assign_type_indices(streams: list[Stream]) -> None:
 
 
 def _build_validate_cmd(
-    filename: str | os.PathLike[str],
+    filename: str | PathLike[str],
     ffprobe_path: str = "ffprobe",
     loglevel: str = "warning",
     extra_args: tuple[str, ...] = (),
@@ -558,7 +557,7 @@ def _interpret_validate(returncode: int, stderr_bytes: bytes) -> tuple[bool, str
     return (ok, stderr_text)
 
 
-def _build_probe_cmd(filename: str | os.PathLike[str], ffprobe_path: str = "ffprobe") -> list[str]:
+def _build_probe_cmd(filename: str | PathLike[str], ffprobe_path: str = "ffprobe") -> list[str]:
     """Build the ffprobe JSON-introspection command (pure; shared by sync/async)."""
     filename_str = _resolve_input(filename)
     return [
@@ -593,7 +592,7 @@ def _parse_probe_output(stdout: bytes, cmd: list[str]) -> ProbeResult:
 
 
 def validate(
-    filename: str | os.PathLike[str],
+    filename: str | PathLike[str],
     ffprobe_path: str = "ffprobe",
     loglevel: str = "warning",
     extra_args: tuple[str, ...] = (),
@@ -605,7 +604,7 @@ def validate(
     boolean health-check without wrapping in ``try/except``.
 
     Args:
-        filename: Path to the media file (str or PathLike).
+        filename: Path to the media file or special ffmpeg input string.
         ffprobe_path: Path to the ffprobe executable.
         loglevel: Value passed to ffprobe's ``-v`` flag. Defaults to
             ``"warning"`` so DTS/codec warnings surface in stderr.
@@ -646,7 +645,7 @@ def validate(
     return _interpret_validate(result.returncode, result.stderr)
 
 
-def probe(filename: str | os.PathLike[str], ffprobe_path: str = "ffprobe") -> ProbeResult:
+def probe(filename: str | PathLike[str], ffprobe_path: str = "ffprobe") -> ProbeResult:
     """Run ffprobe on the specified file and return typed output.
 
     Args:
