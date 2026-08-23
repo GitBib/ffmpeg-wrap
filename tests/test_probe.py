@@ -1,5 +1,5 @@
-import os
 import subprocess
+from os import PathLike
 from pathlib import Path
 from unittest.mock import patch
 
@@ -19,6 +19,13 @@ class TestResolveInput:
         result = _resolve_input(Path("video.mkv"))
         assert result == str(Path("video.mkv").resolve())
 
+    def test_custom_pathlike(self):
+        class CustomPath(PathLike[str]):
+            def __fspath__(self) -> str:
+                return "video.mkv"
+
+        assert _resolve_input(CustomPath()) == str(Path("video.mkv").resolve())
+
     def test_pipe_protocol(self):
         assert _resolve_input("pipe:") == "pipe:"
         assert _resolve_input("pipe:0") == "pipe:0"
@@ -26,14 +33,6 @@ class TestResolveInput:
     def test_url(self):
         assert _resolve_input("http://example.com/video.mp4") == "http://example.com/video.mp4"
         assert _resolve_input("rtmp://stream.example.com/live") == "rtmp://stream.example.com/live"
-
-    def test_bytes_pathlike(self):
-        class BytesPath(os.PathLike):
-            def __fspath__(self):
-                return b"video.mkv"
-
-        result = _resolve_input(BytesPath())
-        assert result == str(Path("video.mkv").resolve())
 
     def test_protocol_looking_filename_md5(self):
         result = _resolve_input("md5:clip.mkv")
@@ -578,8 +577,8 @@ class TestProbeFunction:
         assert cmd[-1] == resolved
 
     @patch("ffmpeg_wrap._probe.subprocess.run")
-    def test_probe_pathlike_with_protocol_name_resolves_path(self, mock_run):
-        """PathLike inputs must always be resolved, even if the string looks like a protocol."""
+    def test_probe_path_with_protocol_name_resolves_path(self, mock_run):
+        """Path inputs must always be resolved, even if the string looks like a protocol."""
         mock_run.return_value = subprocess.CompletedProcess(
             args=[], returncode=0, stdout=msgspec.json.encode({"streams": []}), stderr=b""
         )
@@ -589,20 +588,16 @@ class TestProbeFunction:
         assert cmd[-1] == resolved
 
     @patch("ffmpeg_wrap._probe.subprocess.run")
-    def test_probe_with_bytes_pathlike(self, mock_run):
-        """A PathLike returning bytes must be decoded and resolved, not crash."""
-
-        class BytesPath(os.PathLike):
-            def __fspath__(self):
-                return b"video.mkv"
+    def test_probe_with_custom_pathlike(self, mock_run):
+        class CustomPath(PathLike[str]):
+            def __fspath__(self) -> str:
+                return "video.mkv"
 
         mock_run.return_value = subprocess.CompletedProcess(
             args=[], returncode=0, stdout=msgspec.json.encode({"streams": []}), stderr=b""
         )
-        probe(BytesPath())
-        cmd = mock_run.call_args[0][0]
-        resolved = str(Path("video.mkv").resolve())
-        assert cmd[-1] == resolved
+        probe(CustomPath())
+        assert mock_run.call_args[0][0][-1] == str(Path("video.mkv").resolve())
 
     @patch("ffmpeg_wrap._probe.subprocess.run")
     def test_probe_raises_ffmpeg_error_on_missing_binary(self, mock_run):

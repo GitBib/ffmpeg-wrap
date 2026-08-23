@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import locale
 import logging
-import os
 import subprocess
 import sys  # noqa: F401  # re-exported so tests can patch ``_builder.sys.stderr`` (the shared TeePump reads ``sys.stderr``)
 import threading
+from os import PathLike
+from pathlib import Path
 from typing import Any, Literal, overload
 
 from ffmpeg_wrap import _textio
@@ -94,20 +95,20 @@ class FFmpeg:
         for inp in self._inputs:
             for k, v in inp["kwargs"].items():
                 cmd.extend(_convert_arg(k, v))
-            cmd.extend(["-i", inp["filename"]])
+            cmd.extend(["-i", str(inp["filename"])])
 
         for out in self._outputs:
             for k, v in out["kwargs"].items():
                 cmd.extend(_convert_arg(k, v))
-            cmd.append(out["filename"])
+            cmd.append(str(out["filename"]))
 
         return cmd
 
-    def input(self, filename: str | os.PathLike[str], **kwargs: Any) -> FFmpeg:
+    def input(self, filename: str | PathLike[str], **kwargs: Any) -> FFmpeg:
         """Add an input file with optional arguments.
 
         Args:
-            filename: Input file path or PathLike object.
+            filename: Input filesystem path or special ffmpeg input string.
             **kwargs: FFmpeg input options (e.g., t=10).
 
         Returns:
@@ -121,14 +122,15 @@ class FFmpeg:
             # Emits: -ss 30 -t 60 -i clip.mkv
             ```
         """
-        self._inputs.append({"filename": os.fsdecode(filename), "kwargs": kwargs})
+        filename_str = filename if isinstance(filename, str) else str(Path(filename))
+        self._inputs.append({"filename": filename_str, "kwargs": kwargs})
         return self
 
-    def output(self, filename: str | os.PathLike[str], **kwargs: Any) -> FFmpeg:
+    def output(self, filename: str | PathLike[str], **kwargs: Any) -> FFmpeg:
         """Add an output file with optional arguments.
 
         Args:
-            filename: Output file path or PathLike object.
+            filename: Output filesystem path or special ffmpeg output string.
             **kwargs: FFmpeg output options (e.g., c="copy", ac=2).
 
         Returns:
@@ -141,7 +143,8 @@ class FFmpeg:
             input("in.mkv").output("out.mp4", c="copy", ac=2)
             ```
         """
-        self._outputs.append({"filename": os.fsdecode(filename), "kwargs": kwargs})
+        filename_str = filename if isinstance(filename, str) else str(Path(filename))
+        self._outputs.append({"filename": filename_str, "kwargs": kwargs})
         return self
 
     def _append_output_list(self, key: str, values: list[str]) -> None:
@@ -494,12 +497,13 @@ class FFmpeg:
         self._filter_graph_args = ["-filter_complex", graph_str]
         return self
 
-    def filter_complex_script(self, path: str | os.PathLike[str]) -> FFmpeg:
-        """Read a graph-level filtergraph from a file via ``-filter_complex_script``.
+    def filter_complex_script(self, path: str | PathLike[str]) -> FFmpeg:
+        """Read a graph-level filtergraph from a UTF-8 file.
 
-        Emits ``-filter_complex_script <path>`` in the same dedicated slot as
-        :meth:`filter_complex` (after global args, before inputs). Mutually
-        exclusive with :meth:`filter_complex` at runtime (not enforced here).
+        Reads the file when this method is called and emits its contents via
+        ``-filter_complex`` in the same dedicated slot as :meth:`filter_complex`
+        (after global args, before inputs). Mutually exclusive with
+        :meth:`filter_complex` at runtime (not enforced here).
 
         Args:
             path: Path to a file containing the filtergraph.
@@ -514,7 +518,8 @@ class FFmpeg:
             input("in.mkv").filter_complex_script("graph.txt").output("out.mp4").run()
             ```
         """
-        self._filter_graph_args = ["-filter_complex_script", os.fsdecode(path)]
+        graph_str = Path(path).read_text(encoding="utf-8")
+        self._filter_graph_args = ["-filter_complex", graph_str]
         return self
 
     @overload
@@ -583,20 +588,31 @@ class FFmpeg:
         try:
             if capture_stderr:
                 # Caller wants stderr returned: capture it directly.
-                process = subprocess.run(
+                if text:
+                    process_text = subprocess.run(
+                        cmd,
+                        stdout=stdout_dest,
+                        stderr=subprocess.PIPE,
+                        check=True,
+                        text=True,
+                    )
+                    return process_text.stdout, process_text.stderr
+                process_bytes = subprocess.run(
                     cmd,
                     stdout=stdout_dest,
                     stderr=subprocess.PIPE,
                     check=True,
-                    text=text,
+                    text=False,
                 )
-                return process.stdout, process.stderr
+                return process_bytes.stdout, process_bytes.stderr
             # Caller does not capture stderr: tee ffmpeg's stderr to the
             # inherited stderr stream in real time (preserving the live
             # progress output of a bare ``run()``) while collecting it, so the
             # failure path can still populate ``FFmpegError.stderr`` without
             # silently buffering an entire successful run in memory.
             stdout_data = self._run_tee(cmd, stdout_dest, text)
+            if isinstance(stdout_data, str):
+                return stdout_data, None
             return stdout_data, None
         except subprocess.CalledProcessError as e:
             if e.stderr is None:
@@ -755,14 +771,14 @@ def _convert_arg(key: str, value: Any) -> list[str]:
     return [flag, str(value)]
 
 
-def input(filename: str | os.PathLike[str], ffmpeg_path: str = "ffmpeg", **kwargs: Any) -> FFmpeg:
+def input(filename: str | PathLike[str], ffmpeg_path: str = "ffmpeg", **kwargs: Any) -> FFmpeg:
     """Start a new FFmpeg chain with an input file.
 
     This is the recommended entry point for building a fluent chain. It creates
     a fresh :class:`FFmpeg` instance and calls :meth:`~FFmpeg.input` on it.
 
     Args:
-        filename: Input file path or PathLike object.
+        filename: Input filesystem path or special ffmpeg input string.
         ffmpeg_path: Path to the ffmpeg executable. Defaults to ``"ffmpeg"``
             (resolved from ``PATH``).
         **kwargs: FFmpeg input options passed through to the input slot

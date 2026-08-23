@@ -88,8 +88,10 @@ outputs to multiple files:
 )
 ```
 
-For large graphs, read them from a file with `filter_complex_script()`. It is
-mutually exclusive with `filter_complex()` at runtime, so use one or the other:
+For large graphs, read them from a UTF-8 file with `filter_complex_script()`.
+The file is read when the method is called and its contents are passed through
+the portable `-filter_complex` option. It is mutually exclusive with
+`filter_complex()` at runtime, so use one or the other:
 
 ```python
 (
@@ -98,7 +100,7 @@ mutually exclusive with `filter_complex()` at runtime, so use one or the other:
     .output("output.mp4")
     .run()
 )
-# ffmpeg -filter_complex_script graph.txt -i input.mkv output.mp4
+# ffmpeg -filter_complex "<contents of graph.txt>" -i input.mkv output.mp4
 ```
 
 When embedding a path inside a filtergraph (e.g. `subtitles=`), escape it with

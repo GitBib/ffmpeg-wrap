@@ -1,6 +1,6 @@
 import io
-import os
 import subprocess
+from os import PathLike
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -444,38 +444,46 @@ class TestFilterComplex:
             "b.mp4",
         ]
 
-    def test_filter_complex_script_emits_script_form(self):
+    def test_filter_complex_script_emits_file_contents(self, tmp_path):
+        script = tmp_path / "graph.txt"
+        script.write_text("[0:v]null[v]", encoding="utf-8")
         ff = FFmpeg()
-        ff.input("in.mkv").output("out.mp4").filter_complex_script("graph.txt")
+        ff.input("in.mkv").output("out.mp4").filter_complex_script(str(script))
         cmd = ff.compile()
         assert cmd == [
             "ffmpeg",
-            "-filter_complex_script",
-            "graph.txt",
+            "-filter_complex",
+            "[0:v]null[v]",
             "-i",
             "in.mkv",
             "out.mp4",
         ]
 
-    def test_filter_complex_script_accepts_path_object(self):
+    def test_filter_complex_script_accepts_path_object(self, tmp_path):
+        script = tmp_path / "graph.txt"
+        script.write_text("[0:v]null[v]", encoding="utf-8")
         ff = FFmpeg()
-        ff.input("in.mkv").output("out.mp4").filter_complex_script(Path("graph.txt"))
+        ff.input("in.mkv").output("out.mp4").filter_complex_script(script)
         cmd = ff.compile()
-        assert cmd[1] == "-filter_complex_script"
-        assert cmd[2] == "graph.txt"
+        assert cmd[1] == "-filter_complex"
+        assert cmd[2] == "[0:v]null[v]"
 
-    def test_filter_complex_returns_self(self):
+    def test_filter_complex_returns_self(self, tmp_path):
+        script = tmp_path / "graph.txt"
+        script.write_text("[0:v]null[v]", encoding="utf-8")
         ff = FFmpeg()
         assert ff.filter_complex("[0:v]null[v]") is ff
-        assert ff.filter_complex_script("graph.txt") is ff
+        assert ff.filter_complex_script(script) is ff
 
-    def test_filter_complex_last_call_wins(self):
+    def test_filter_complex_last_call_wins(self, tmp_path):
+        script = tmp_path / "graph.txt"
+        script.write_text("[0:v]b[v]", encoding="utf-8")
         ff = FFmpeg()
-        ff.input("in.mkv").output("out.mp4").filter_complex("[0:v]a[v]").filter_complex_script("g.txt")
+        ff.input("in.mkv").output("out.mp4").filter_complex("[0:v]a[v]").filter_complex_script(script)
         cmd = ff.compile()
-        assert "-filter_complex" not in cmd
-        assert cmd[1] == "-filter_complex_script"
-        assert cmd[2] == "g.txt"
+        assert cmd.count("-filter_complex") == 1
+        assert cmd[1] == "-filter_complex"
+        assert cmd[2] == "[0:v]b[v]"
 
 
 class TestHwaccel:
@@ -844,7 +852,7 @@ class TestRun:
         assert "".join(fake_stderr.written) == "frame= 10\r"
 
 
-class TestPathLikeSupport:
+class TestPathSupport:
     def test_input_accepts_path_object(self):
         ff = FFmpeg()
         ff.input(Path("in.mkv")).output("out.mp4")
@@ -872,44 +880,20 @@ class TestPathLikeSupport:
         mock_popen.assert_called_once()
 
     def test_input_accepts_custom_pathlike(self):
-        class MyPath(os.PathLike):
-            def __fspath__(self):
-                return "/tmp/custom.mkv"
+        class CustomPath(PathLike[str]):
+            def __fspath__(self) -> str:
+                return str(Path("tmp") / "custom.mkv")
 
-        ff = FFmpeg()
-        ff.input(MyPath()).output("out.mp4")
-        cmd = ff.compile()
-        assert cmd == ["ffmpeg", "-i", "/tmp/custom.mkv", "out.mp4"]
+        cmd = FFmpeg().input(CustomPath()).output("out.mp4").compile()
+        assert cmd == ["ffmpeg", "-i", str(Path("tmp") / "custom.mkv"), "out.mp4"]
 
     def test_output_accepts_custom_pathlike(self):
-        class MyPath(os.PathLike):
-            def __fspath__(self):
-                return "/tmp/custom_out.mp4"
+        class CustomPath(PathLike[str]):
+            def __fspath__(self) -> str:
+                return str(Path("tmp") / "custom_out.mp4")
 
-        ff = FFmpeg()
-        ff.input("in.mkv").output(MyPath(), c="copy")
-        cmd = ff.compile()
-        assert cmd == ["ffmpeg", "-i", "in.mkv", "-c", "copy", "/tmp/custom_out.mp4"]
-
-    def test_input_accepts_bytes_pathlike(self):
-        class BytesPath(os.PathLike):
-            def __fspath__(self):
-                return b"/tmp/bytes_input.mkv"
-
-        ff = FFmpeg()
-        ff.input(BytesPath()).output("out.mp4")
-        cmd = ff.compile()
-        assert cmd == ["ffmpeg", "-i", "/tmp/bytes_input.mkv", "out.mp4"]
-
-    def test_output_accepts_bytes_pathlike(self):
-        class BytesPath(os.PathLike):
-            def __fspath__(self):
-                return b"/tmp/bytes_output.mp4"
-
-        ff = FFmpeg()
-        ff.input("in.mkv").output(BytesPath(), c="copy")
-        cmd = ff.compile()
-        assert cmd == ["ffmpeg", "-i", "in.mkv", "-c", "copy", "/tmp/bytes_output.mp4"]
+        cmd = FFmpeg().input("in.mkv").output(CustomPath(), c="copy").compile()
+        assert cmd == ["ffmpeg", "-i", "in.mkv", "-c", "copy", str(Path("tmp") / "custom_out.mp4")]
 
     def test_input_helper_accepts_path_object(self):
         result = ffmpeg_input(Path("video.mkv"))

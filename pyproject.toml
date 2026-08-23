@@ -27,7 +27,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-async = ["anyio>=4.0"]
+async = ["anyio>=4.14.2"]
 
 [project.urls]
 Homepage = "https://github.com/GitBib/ffmpeg-wrap"
@@ -39,8 +39,9 @@ Issues = "https://github.com/GitBib/ffmpeg-wrap/issues"
 dev = [
     "pytest>=8.0",
     "pytest-timeout>=2.3",
-    "anyio>=4.0",
-    "trio>=0.25",
+    "anyio>=4.14.2",
+    "trio>=0.34.0",
+    "ty==0.0.74",
 ]
 docs = [
     "mkdocs>=1.6",
@@ -93,3 +94,29 @@ ignore = [
 "_builder.py" = ["A001", "A002", "A004"]
 "test_*.py" = ["T20", "ANN", "S", "ERA", "PLR", "ARG", "FBT", "SLF", "E402", "E501", "B007", "G"]
 "conftest.py" = ["ARG"]
+
+[tool.ty.environment]
+python-version = "3.10"
+python-platform = "all"
+
+[tool.ty.src]
+include = ["src"]
+respect-ignore-files = true
+
+[tool.ty.terminal]
+output-format = "concise"
+
+[tool.ty.rules]
+deprecated = "error"
+redundant-cast = "error"
+unused-ignore-comment = "error"
+unused-type-ignore-comment = "error"
+unused-awaitable = "error"
+possibly-missing-submodule = "error"
+missing-type-argument = "error"
+blanket-ignore-comment = "error"
+possibly-missing-attribute = "error"
+possibly-missing-import = "error"
+possibly-unresolved-reference = "error"
+unsound-return-statement = "error"
+missing-override-decorator = "error"

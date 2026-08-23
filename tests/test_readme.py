@@ -6,6 +6,7 @@ from the shipped behavior.
 """
 
 import inspect
+from pathlib import Path
 
 import pytest
 
@@ -61,13 +62,15 @@ def test_filter_complex_fanout_snippet():
     ]
 
 
-def test_filter_complex_script_snippet():
+def test_filter_complex_script_snippet(tmp_path: Path):
     """filter_complex_script reads the graph from a file."""
-    cmd = ffmpeg.input("input.mkv").filter_complex_script("graph.txt").output("output.mp4").compile()
+    script = tmp_path / "graph.txt"
+    script.write_text("[0:v]scale=320:-2[v]", encoding="utf-8")
+    cmd = ffmpeg.input("input.mkv").filter_complex_script(script).output("output.mp4").compile()
     assert cmd == [
         "ffmpeg",
-        "-filter_complex_script",
-        "graph.txt",
+        "-filter_complex",
+        "[0:v]scale=320:-2[v]",
         "-i",
         "input.mkv",
         "output.mp4",

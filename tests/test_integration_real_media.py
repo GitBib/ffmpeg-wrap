@@ -329,7 +329,7 @@ def test_filter_complex_script_scales_video(real_file: Path, tmp_path: Path) -> 
     out = tmp_path / "fcs.mkv"
     (
         ffmpeg.input(real_file, t=1)
-        .filter_complex_script(str(script))
+        .filter_complex_script(script)
         .output(str(out))
         .map("[v]")
         .map("0:a")
