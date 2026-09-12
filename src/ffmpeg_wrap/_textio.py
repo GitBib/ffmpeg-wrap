@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import collections
 import sys
+import threading
 from typing import Any
 
 # Maximum stderr tail retained for ``FFmpegError`` (ffmpeg's diagnostics land at
@@ -21,6 +22,14 @@ def decode_text(data: bytes, encoding: str) -> str:
     for a failed one — into a ``UnicodeDecodeError``.
     """
     return data.decode(encoding, errors="replace").replace("\r\n", "\n").replace("\r", "\n")
+
+
+def decode_error_stderr(value: str | bytes | None, *, text: bool, encoding: str) -> str | None:
+    if value is None or isinstance(value, str):
+        return value
+    if text:
+        return decode_text(value, encoding)
+    return value.decode("utf-8", errors="replace")
 
 
 class TeePump:
@@ -50,6 +59,7 @@ class TeePump:
             self._sink_is_text = True
         self._tail: collections.deque[bytes] = collections.deque()
         self._tail_len = 0
+        self._tail_lock = threading.Lock()
 
     def feed(self, chunk: bytes) -> None:
         """Forward ``chunk`` to the live sink and retain it in the bounded tail."""
@@ -62,11 +72,13 @@ class TeePump:
             self._sink.flush()
         except (OSError, ValueError, TypeError, AttributeError):
             pass
-        self._tail.append(chunk)
-        self._tail_len += len(chunk)
-        while self._tail_len > self._tail_limit and len(self._tail) > 1:
-            self._tail_len -= len(self._tail.popleft())
+        with self._tail_lock:
+            self._tail.append(chunk)
+            self._tail_len += len(chunk)
+            while self._tail_len > self._tail_limit and len(self._tail) > 1:
+                self._tail_len -= len(self._tail.popleft())
 
     def tail_bytes(self) -> bytes:
         """Return the retained bounded tail joined into a single ``bytes``."""
-        return b"".join(self._tail)
+        with self._tail_lock:
+            return b"".join(self._tail)

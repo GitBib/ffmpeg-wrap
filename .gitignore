@@ -16,6 +16,9 @@ wheels/
 # MkDocs build output
 site/
 
+# Log of the `make test-platform` skip gate
+.pytest-platform.log*
+
 # Coverage artifacts
 .coverage
 .coverage.*

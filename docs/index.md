@@ -44,9 +44,9 @@ import ffmpeg_wrap as ffmpeg
 
 result = ffmpeg.probe("video.mkv")
 for stream in result.streams:
-    print(stream.codec_name, stream.codec_type)
+    print(stream.codec_name, stream.codec_type, stream.bit_depth())
 
-ffmpeg.input("input.mkv").output("output.mp4", c="copy").overwrite_output().run()
+ffmpeg.input("input.mkv").output("output.mp4", c="copy").overwrite_output().run(timeout=60)
 ```
 
 ## Async example
@@ -68,7 +68,7 @@ anyio.run(main)
 
 ## Where to next
 
-- [Guide](guide.md) — sync usage: the builder chain, probing, validation, encoder discovery.
-- [Async API](async.md) — the AnyIO-backed mirror, backend choice, and bounding concurrency.
+- [Guide](guide.md) — sync usage: the builder chain, probing, validation, encoder discovery, timeouts.
+- [Async API](async.md) — the AnyIO-backed mirror, backend choice, timeouts, and bounding concurrency.
 - [API Reference — Sync](reference/sync.md) — auto-generated reference for the public sync surface.
 - [API Reference — Async](reference/async.md) — auto-generated reference for `ffmpeg_wrap.aio`.

@@ -17,8 +17,8 @@ from __future__ import annotations
 import locale
 import logging
 from os import PathLike
-from subprocess import PIPE, CalledProcessError
-from typing import TYPE_CHECKING, Literal, overload
+from subprocess import PIPE, CalledProcessError, CompletedProcess, TimeoutExpired
+from typing import TYPE_CHECKING, Any, Literal, overload
 
 try:
     import anyio
@@ -26,20 +26,26 @@ except ImportError as exc:  # pragma: no cover - exercised via subprocess in tes
     raise ImportError("install ffmpeg-wrap[async] to use ffmpeg_wrap.aio") from exc
 
 from ffmpeg_wrap._encoders import _ENCODERS_CACHE, _build_encoders_cmd, _parse_encoders
-from ffmpeg_wrap._errors import _build_ffmpeg_error
+from ffmpeg_wrap._errors import (
+    FFmpegError,
+    FFmpegTimeoutError,
+    _build_ffmpeg_error,
+    _build_ffmpeg_timeout_error,
+)
 from ffmpeg_wrap._probe import (
     ProbeResult,
     _build_probe_cmd,
     _build_validate_cmd,
     _interpret_validate,
     _parse_probe_output,
+    _validate_timeout,
 )
-from ffmpeg_wrap._textio import TeePump, decode_text
+from ffmpeg_wrap._textio import TeePump, decode_error_stderr, decode_text
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from anyio.abc import ByteReceiveStream
+    from anyio.abc import ByteReceiveStream, Process
 
     from ffmpeg_wrap._builder import FFmpeg
 
@@ -48,28 +54,39 @@ logger = logging.getLogger("ffmpeg_wrap")
 __all__ = ["encoders", "has_encoder", "probe", "run", "validate"]
 
 
-def _decode_error_stderr(stderr: bytes | None, encoding: str, *, text: bool) -> str | None:
-    """Decode captured error stderr to match the sync ``run`` error path.
-
-    Parity rules (see ``_builder.run`` lines 411-414 and ``_builder._run_tee``):
-
-    * ``text=False`` — sync receives raw ``bytes`` and decodes them as UTF-8
-      with ``errors="replace"`` and NO universal-newline translation. We do the
-      identical thing so ``FFmpegError.stderr`` is byte-for-byte the same even
-      when the locale is not UTF-8 or stderr contains ffmpeg's ``\\r`` progress.
-    * ``text=True`` — sync's value already went through locale-decode plus
-      universal-newline translation; we mirror that via the lenient
-      :func:`decode_text` (the documented lenient-vs-strict edge for undecodable
-      bytes).
-    """
-    if stderr is None:
-        return None
-    if text:
-        return decode_text(stderr, encoding)
-    return stderr.decode("utf-8", errors="replace")
+def _launch_error(tool: str, cmd: list[str], e: OSError) -> FFmpegError:
+    logger.error(f"{tool} could not be executed: {e}")
+    return _build_ffmpeg_error(f"{tool} could not be executed: {e}", cmd=cmd)
 
 
-async def probe(filename: str | PathLike[str], ffprobe_path: str = "ffprobe") -> ProbeResult:
+def _timeout_error(tool: str, cmd: list[str], timeout: float, stderr: str | None = None) -> FFmpegTimeoutError:
+    subject = "FFmpeg command" if tool == "ffmpeg" else tool
+    logger.error(f"{subject} timed out after {timeout}s: {stderr or str(TimeoutExpired(cmd, timeout))}")
+    return _build_ffmpeg_timeout_error(f"{tool} timed out after {timeout}s", timeout=timeout, stderr=stderr, cmd=cmd)
+
+
+async def _run_process(tool: str, cmd: list[str], timeout: float | None, **kwargs: Any) -> CompletedProcess[bytes]:
+    async def _spawn() -> CompletedProcess[bytes]:
+        try:
+            return await anyio.run_process(cmd, check=False, **kwargs)
+        except OSError as e:
+            raise _launch_error(tool, cmd, e) from e
+
+    if timeout is None:
+        return await _spawn()
+    try:
+        with anyio.fail_after(timeout):
+            return await _spawn()
+    except TimeoutError as e:
+        raise _timeout_error(tool, cmd, timeout) from e
+
+
+async def probe(
+    filename: str | PathLike[str],
+    ffprobe_path: str = "ffprobe",
+    *,
+    timeout: float | None = None,
+) -> ProbeResult:
     """Run ffprobe asynchronously and return typed output.
 
     Async mirror of :func:`ffmpeg_wrap.probe`. Reuses the shared command builder
@@ -78,12 +95,18 @@ async def probe(filename: str | PathLike[str], ffprobe_path: str = "ffprobe") ->
     Args:
         filename: Path to the file to probe.
         ffprobe_path: Path to the ffprobe executable.
+        timeout: Wall-clock limit in seconds, or ``None`` (the default) for
+            no limit. The deadline covers the launch itself; when it expires
+            the child is killed and reaped, then
+            :class:`~ffmpeg_wrap.FFmpegTimeoutError` is raised.
 
     Returns:
         Parsed and typed output from ffprobe.
 
     Raises:
         FFmpegError: If ffprobe fails or output cannot be parsed.
+        FFmpegTimeoutError: If ``timeout`` expires before ffprobe exits.
+        ValueError: If ``timeout`` is not a positive finite number of at most 2147483.647 seconds.
 
     Example:
         ```python
@@ -99,12 +122,9 @@ async def probe(filename: str | PathLike[str], ffprobe_path: str = "ffprobe") ->
         anyio.run(main)
         ```
     """
+    _validate_timeout(timeout)
     cmd = _build_probe_cmd(filename, ffprobe_path)
-    try:
-        result = await anyio.run_process(cmd, check=False)
-    except OSError as e:
-        logger.error(f"ffprobe could not be executed: {e}")
-        raise _build_ffmpeg_error(f"ffprobe could not be executed: {e}", cmd=cmd) from e
+    result = await _run_process("ffprobe", cmd, timeout)
     if result.returncode != 0:
         stderr_text = result.stderr.decode("utf-8", errors="replace") if result.stderr else None
         # Empty-stderr fallback mirrors sync ``probe`` (``stderr_text or str(e)``
@@ -126,6 +146,8 @@ async def validate(
     ffprobe_path: str = "ffprobe",
     loglevel: str = "warning",
     extra_args: tuple[str, ...] = (),
+    *,
+    timeout: float | None = None,
 ) -> tuple[bool, str]:
     """Run ffprobe in validation mode asynchronously and report diagnostics.
 
@@ -139,14 +161,20 @@ async def validate(
         loglevel: Value passed to ffprobe's ``-v`` flag (default ``"warning"``).
         extra_args: Additional raw arguments forwarded to ffprobe before the
             filename.
+        timeout: Wall-clock limit in seconds, or ``None`` (the default) for
+            no limit. The deadline covers the launch itself; when it expires
+            the child is killed and reaped, then
+            :class:`~ffmpeg_wrap.FFmpegTimeoutError` is raised.
 
     Returns:
         ``(ok, stderr_text)`` — see :func:`ffmpeg_wrap.validate`. Does NOT raise
         on bad media — that is a normal outcome for a validator.
 
     Raises:
-        FFmpegError: Only when the ffprobe executable cannot be run.
-        ValueError: On an invalid ``loglevel``.
+        FFmpegError: When the ffprobe executable itself cannot be run.
+        FFmpegTimeoutError: If ``timeout`` expires before ffprobe exits.
+        ValueError: On an invalid ``loglevel`` or a ``timeout`` that is not a positive finite number of
+            at most 2147483.647 seconds.
 
     Example:
         ```python
@@ -161,12 +189,9 @@ async def validate(
         anyio.run(main)
         ```
     """
+    _validate_timeout(timeout)
     cmd = _build_validate_cmd(filename, ffprobe_path, loglevel, extra_args)
-    try:
-        result = await anyio.run_process(cmd, check=False)
-    except OSError as e:
-        logger.error(f"ffprobe could not be executed: {e}")
-        raise _build_ffmpeg_error(f"ffprobe could not be executed: {e}", cmd=cmd) from e
+    result = await _run_process("ffprobe", cmd, timeout)
     return _interpret_validate(result.returncode, result.stderr)
 
 
@@ -268,6 +293,7 @@ async def run(
     capture_stderr: bool = ...,
     *,
     text: Literal[False] = ...,
+    timeout: float | None = ...,
 ) -> tuple[bytes | None, bytes | None]: ...
 
 
@@ -278,6 +304,7 @@ async def run(
     capture_stderr: bool = ...,
     *,
     text: Literal[True],
+    timeout: float | None = ...,
 ) -> tuple[str | None, str | None]: ...
 
 
@@ -287,6 +314,7 @@ async def run(
     capture_stderr: bool = False,
     *,
     text: bool = False,
+    timeout: float | None = None,
 ) -> tuple[bytes | None, bytes | None] | tuple[str | None, str | None]:
     """Build and execute an :class:`~ffmpeg_wrap.FFmpeg` command asynchronously.
 
@@ -312,12 +340,18 @@ async def run(
         capture_stderr: Whether to capture stderr (else tee it live).
         text: When True, decode stdout/stderr (and ``FFmpegError.stderr``) as
             text leniently using the platform default encoding.
+        timeout: Wall-clock limit in seconds, or ``None`` (the default) for
+            no limit. The deadline covers the launch itself; when it expires
+            the child is killed and reaped, then
+            :class:`~ffmpeg_wrap.FFmpegTimeoutError` is raised.
 
     Returns:
         Tuple of (stdout, stderr); see :meth:`ffmpeg_wrap.FFmpeg.run`.
 
     Raises:
         FFmpegError: If ffmpeg fails or cannot be executed.
+        FFmpegTimeoutError: If ``timeout`` expires before ffmpeg exits.
+        ValueError: If ``timeout`` is not a positive finite number of at most 2147483.647 seconds.
 
     Example:
         ```python
@@ -335,14 +369,15 @@ async def run(
         anyio.run(main)
         ```
     """
+    _validate_timeout(timeout)
     cmd = ffmpeg.compile()
     stdout_dest = PIPE if capture_stdout else None
 
     logger.debug(f"Running ffmpeg command (async): {' '.join(cmd)}")
 
     if capture_stderr:
-        return await _run_capture(cmd, stdout_dest, text=text)
-    return await _run_tee(cmd, stdout_dest, text=text)
+        return await _run_capture(cmd, stdout_dest, text=text, timeout=timeout)
+    return await _run_tee(cmd, stdout_dest, text=text, timeout=timeout)
 
 
 async def _run_capture(
@@ -350,14 +385,11 @@ async def _run_capture(
     stdout_dest: int | None,
     *,
     text: bool,
+    timeout: float | None,
 ) -> tuple[bytes | None, bytes | None] | tuple[str | None, str | None]:
     """Capture-path exec: collect stderr (and optionally stdout) via run_process."""
     encoding = locale.getpreferredencoding(False)
-    try:
-        result = await anyio.run_process(cmd, stdout=stdout_dest, stderr=PIPE, check=False)
-    except OSError as e:
-        logger.error(f"ffmpeg could not be executed: {e}")
-        raise _build_ffmpeg_error(f"ffmpeg could not be executed: {e}", cmd=cmd) from e
+    result = await _run_process("ffmpeg", cmd, timeout, stdout=stdout_dest, stderr=PIPE)
 
     if result.returncode:
         # ``run_process`` always returns raw bytes. Decode the error stderr the
@@ -366,7 +398,7 @@ async def _run_capture(
         # ``errors="replace"`` and NO newline translation (``_builder.run``
         # lines 411-414); on the ``text=True`` path sync's value already went
         # through locale-decode + universal newlines (mirrored by ``decode_text``).
-        stderr_text = _decode_error_stderr(result.stderr, encoding, text=text)
+        stderr_text = decode_error_stderr(result.stderr, encoding=encoding, text=text)
         # Empty-stderr fallback mirrors sync ``run`` (``stderr_text or str(e)``
         # where ``e`` is the ``CalledProcessError``) so ``str(FFmpegError)`` is
         # byte-for-byte identical across sync/async.
@@ -392,6 +424,7 @@ async def _run_tee(
     stdout_dest: int | None,
     *,
     text: bool,
+    timeout: float | None,
 ) -> tuple[bytes | None, bytes | None] | tuple[str | None, str | None]:
     """Tee-path exec: forward stderr live, accumulate stdout, no sync pump thread.
 
@@ -408,11 +441,7 @@ async def _run_tee(
     """
     encoding = locale.getpreferredencoding(False)
     pump = TeePump(encoding)
-    try:
-        process = await anyio.open_process(cmd, stdout=stdout_dest, stderr=PIPE, stdin=None)
-    except OSError as e:
-        logger.error(f"ffmpeg could not be executed: {e}")
-        raise _build_ffmpeg_error(f"ffmpeg could not be executed: {e}", cmd=cmd) from e
+    stdout_buffer = bytearray()
 
     async def _drain(stream: ByteReceiveStream | None, on_chunk: Callable[[bytes], object]) -> None:
         # ``ClosedResourceError`` is caught alongside ``EndOfStream`` so a read
@@ -426,26 +455,35 @@ async def _run_tee(
                 break
             on_chunk(chunk)
 
-    async def _collect(stream: ByteReceiveStream | None) -> bytes:
-        buffer = bytearray()
-        await _drain(stream, buffer.extend)
-        return bytes(buffer)
+    async def _spawn() -> Process:
+        try:
+            process = await anyio.open_process(cmd, stdout=stdout_dest, stderr=PIPE, stdin=None)
+        except OSError as e:
+            raise _launch_error("ffmpeg", cmd, e) from e
+        async with process, anyio.create_task_group() as tg:
+            tg.start_soon(_drain, process.stderr, pump.feed, name="ffmpeg-wrap stderr tee")
+            tg.start_soon(_drain, process.stdout, stdout_buffer.extend, name="ffmpeg-wrap stdout collector")
+            await process.wait()
+        return process
 
-    stdout_handle: anyio.TaskHandle[bytes] | None = None
-    async with process, anyio.create_task_group() as tg:
-        tg.start_soon(_drain, process.stderr, pump.feed, name="ffmpeg-wrap stderr tee")
-        if stdout_dest is not None:
-            stdout_handle = tg.start_soon(_collect, process.stdout, name="ffmpeg-wrap stdout collector")
-        await process.wait()
+    if timeout is None:
+        process = await _spawn()
+    else:
+        try:
+            with anyio.fail_after(timeout):
+                process = await _spawn()
+        except TimeoutError as e:
+            stderr_text = decode_error_stderr(pump.tail_bytes(), encoding=encoding, text=text) or None
+            raise _timeout_error("ffmpeg", cmd, timeout, stderr_text) from e
 
-    stdout_data = stdout_handle.return_value if stdout_handle is not None else None
+    stdout_data = bytes(stdout_buffer) if stdout_dest is not None else None
 
     if process.returncode:
         # Match sync ``_run_tee`` + ``run`` error handling: text=False decodes
         # the bounded tail as UTF-8/replace (no newline translation), text=True
-        # uses the locale ``decode_text``. See ``_decode_error_stderr``.
+        # uses the locale ``decode_text``. See ``decode_error_stderr``.
         stderr_bytes = pump.tail_bytes()
-        stderr_text = _decode_error_stderr(stderr_bytes, encoding, text=text)
+        stderr_text = decode_error_stderr(stderr_bytes, encoding=encoding, text=text)
         # Empty-stderr fallback mirrors sync ``_run_tee`` (which raises
         # ``CalledProcessError`` that ``run`` formats via ``str(e)``) so
         # ``str(FFmpegError)`` is byte-for-byte identical across sync/async.

@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from functools import partial
+from typing import Any
+
 
 class FFmpegError(Exception):
     """Custom exception for FFmpeg errors.
@@ -14,7 +17,8 @@ class FFmpegError(Exception):
             and :func:`~ffmpeg_wrap.probe` / :func:`~ffmpeg_wrap.validate`
             failures.
         returncode: Process exit code, or ``None`` when the process could not
-            be launched at all (e.g. executable not found).
+            be launched at all (e.g. executable not found) or when a
+            ``timeout`` expired (see :class:`FFmpegTimeoutError`).
         cmd: The exact command list that was executed, or ``None``.
 
     Example:
@@ -59,3 +63,52 @@ def _build_ffmpeg_error(
     site; this helper only wires the structured introspection fields.
     """
     return FFmpegError(message, stderr=stderr, returncode=returncode, cmd=cmd)
+
+
+class FFmpegTimeoutError(FFmpegError):
+    """Raised when ``timeout`` expires before the process exits.
+
+    The child is killed and reaped before this is raised; descendants it
+    spawned are not. Subclasses :class:`FFmpegError`, so ``except FFmpegError``
+    still catches it. ``returncode`` is always ``None``.
+
+    Attributes:
+        timeout: The limit, in seconds, that was exceeded.
+        stderr: The stderr tail collected before the kill, or ``None``.
+        cmd: The exact command list that was executed, or ``None``.
+
+    Example:
+        ```python
+        import ffmpeg_wrap as ffmpeg
+
+        try:
+            ffmpeg.input("in.mkv").output("out.mp4").run(timeout=60)
+        except ffmpeg.FFmpegTimeoutError as e:
+            print("gave up after", e.timeout, "seconds")
+        ```
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        timeout: float,
+        stderr: str | None = None,
+        returncode: int | None = None,
+        cmd: list[str] | None = None,
+    ) -> None:
+        super().__init__(message, stderr=stderr, returncode=returncode, cmd=cmd)
+        self.timeout = timeout
+
+    def __reduce__(self) -> tuple[partial[FFmpegTimeoutError], tuple[Any, ...], dict[str, Any]]:  # ty: ignore[missing-override-decorator]
+        return (partial(type(self), timeout=self.timeout), self.args, self.__dict__)
+
+
+def _build_ffmpeg_timeout_error(
+    message: str,
+    *,
+    timeout: float,
+    stderr: str | None = None,
+    cmd: list[str] | None = None,
+) -> FFmpegTimeoutError:
+    return FFmpegTimeoutError(message, timeout=timeout, stderr=stderr, returncode=None, cmd=cmd)

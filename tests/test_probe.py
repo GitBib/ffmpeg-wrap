@@ -7,7 +7,29 @@ import msgspec
 import pytest
 
 from ffmpeg_wrap._errors import FFmpegError
-from ffmpeg_wrap._probe import CodecType, Format, ProbeResult, Stream, _resolve_input, probe, validate
+from ffmpeg_wrap._probe import (
+    CodecType,
+    Format,
+    ProbeResult,
+    Stream,
+    _parse_probe_output,
+    _resolve_input,
+    probe,
+    validate,
+)
+
+BIT_DEPTH_ROWS = [
+    ("pcm_s16le", None, "pcm_s16le", "s16", 16, None, 16),
+    ("pcm_s24le", None, "pcm_s24le", "s32", 24, "24", 24),
+    ("pcm_f32le", None, "pcm_f32le", "flt", 32, None, 32),
+    ("adpcm_ima_wav", None, "adpcm_ima_wav", "s16p", 4, None, 4),
+    ("pcm_mulaw", None, "pcm_mulaw", "s16", 8, None, 8),
+    ("flac", "s16", "flac", "s16", 0, "16", 16),
+    ("flac", "s32", "flac", "s32", 0, "24", 24),
+    ("libmp3lame", None, "mp3", "fltp", 0, None, None),
+    ("libopus", None, "opus", "fltp", 0, None, None),
+]
+BIT_DEPTH_IDS = [f"{encoder}-{sample_fmt or 'default'}" for encoder, sample_fmt, *_ in BIT_DEPTH_ROWS]
 
 
 class TestResolveInput:
@@ -189,6 +211,167 @@ class TestStreamKindPredicates:
         assert CodecType.SUBTITLE == "subtitle"
         assert CodecType.DATA == "data"
         assert CodecType.ATTACHMENT == "attachment"
+
+
+class TestStreamBitDepth:
+    @pytest.mark.parametrize(
+        ("codec_name", "sample_fmt", "bits_per_sample", "bits_per_raw_sample", "expected"),
+        [row[2:] for row in BIT_DEPTH_ROWS],
+        ids=BIT_DEPTH_IDS,
+    )
+    def test_matrix(self, codec_name, sample_fmt, bits_per_sample, bits_per_raw_sample, expected):
+        stream = Stream(
+            index=0,
+            codec_name=codec_name,
+            codec_type="audio",
+            sample_fmt=sample_fmt,
+            bits_per_sample=bits_per_sample,
+            bits_per_raw_sample=bits_per_raw_sample,
+        )
+        assert stream.bit_depth() == expected
+
+    def test_raw_sample_wins_over_coded_width(self):
+        stream = Stream(index=0, bits_per_sample=32, bits_per_raw_sample="24")
+        assert stream.bit_depth() == 24
+
+    def test_video_stream_answers_pixel_bit_depth(self):
+        stream = Stream(index=0, codec_name="h264", codec_type="video", bits_per_raw_sample="8")
+        assert stream.sample_fmt is None
+        assert stream.bits_per_sample is None
+        assert stream.bit_depth() == 8
+
+    def test_non_numeric_raw_sample_falls_back_to_coded_width(self):
+        stream = Stream(index=0, bits_per_sample=16, bits_per_raw_sample="N/A")
+        assert stream.bit_depth() == 16
+
+    def test_zero_raw_sample_falls_back_to_coded_width(self):
+        stream = Stream(index=0, bits_per_sample=16, bits_per_raw_sample="0")
+        assert stream.bit_depth() == 16
+
+    def test_zero_raw_sample_and_zero_width_is_none(self):
+        stream = Stream(index=0, bits_per_sample=0, bits_per_raw_sample="0")
+        assert stream.bit_depth() is None
+
+    def test_non_numeric_raw_sample_and_zero_width_is_none(self):
+        stream = Stream(index=0, bits_per_sample=0, bits_per_raw_sample="N/A")
+        assert stream.bit_depth() is None
+
+    def test_no_fields_is_none(self):
+        stream = Stream(index=0, bits_per_sample=None, bits_per_raw_sample=None)
+        assert stream.bit_depth() is None
+
+    def test_zero_coded_width_without_raw_is_none(self):
+        stream = Stream(index=0, sample_fmt="fltp", bits_per_sample=0)
+        assert stream.bit_depth() is None
+
+    def test_negative_coded_width_is_none(self):
+        stream = Stream(index=0, bits_per_sample=-1)
+        assert stream.bit_depth() is None
+
+    def test_defaults_are_none(self):
+        stream = Stream(index=0)
+        assert stream.sample_fmt is None
+        assert stream.bits_per_sample is None
+        assert stream.bits_per_raw_sample is None
+
+    def test_positional_constructor_keeps_0_4_0_layout(self):
+        stream = Stream(
+            0, "aac", "audio", None, None, 2, "48000", "1.0", "128000", {"language": "eng"}, {"default": 1}, 3
+        )
+        assert stream.index == 0
+        assert stream.codec_name == "aac"
+        assert stream.codec_type == "audio"
+        assert stream.width is None
+        assert stream.height is None
+        assert stream.channels == 2
+        assert stream.sample_rate == "48000"
+        assert stream.duration == "1.0"
+        assert stream.bit_rate == "128000"
+        assert stream.tags == {"language": "eng"}
+        assert stream.disposition == {"default": 1}
+        assert stream.type_index == 3
+        assert stream.sample_fmt is None
+        assert stream.bits_per_sample is None
+        assert stream.bits_per_raw_sample is None
+
+    def test_parse_probe_output_all_fields(self):
+        raw = msgspec.json.encode(
+            {
+                "streams": [
+                    {
+                        "index": 0,
+                        "codec_name": "flac",
+                        "codec_type": "audio",
+                        "sample_fmt": "s32",
+                        "bits_per_sample": 0,
+                        "bits_per_raw_sample": "24",
+                    }
+                ]
+            }
+        )
+        stream = _parse_probe_output(raw, ["ffprobe"]).streams[0]
+        assert stream.sample_fmt == "s32"
+        assert stream.bits_per_sample == 0
+        assert stream.bits_per_raw_sample == "24"
+        assert stream.bit_depth() == 24
+
+    def test_parse_probe_output_fields_omitted(self):
+        raw = msgspec.json.encode({"streams": [{"index": 0, "codec_name": "h264", "codec_type": "video"}]})
+        stream = _parse_probe_output(raw, ["ffprobe"]).streams[0]
+        assert stream.sample_fmt is None
+        assert stream.bits_per_sample is None
+        assert stream.bits_per_raw_sample is None
+        assert stream.bit_depth() is None
+
+    def test_parse_probe_output_raw_sample_na(self):
+        raw = msgspec.json.encode(
+            {
+                "streams": [
+                    {
+                        "index": 0,
+                        "codec_type": "audio",
+                        "sample_fmt": "s16",
+                        "bits_per_sample": 16,
+                        "bits_per_raw_sample": "N/A",
+                    }
+                ]
+            }
+        )
+        stream = _parse_probe_output(raw, ["ffprobe"]).streams[0]
+        assert stream.bits_per_raw_sample == "N/A"
+        assert stream.bit_depth() == 16
+
+    def test_parse_probe_output_rejects_non_integer_bits_per_sample(self):
+        raw = msgspec.json.encode({"streams": [{"index": 0, "bits_per_sample": "16"}]})
+        with pytest.raises(FFmpegError, match="ffprobe output parsing error"):
+            _parse_probe_output(raw, ["ffprobe"])
+
+
+@pytest.mark.integration
+class TestStreamBitDepthIntegration:
+    @pytest.mark.parametrize(
+        ("encoder", "sample_fmt", "codec_name", "expected_fmt", "bits_per_sample", "bits_per_raw_sample", "expected"),
+        BIT_DEPTH_ROWS,
+        ids=BIT_DEPTH_IDS,
+    )
+    def test_generated_file_bit_depth(
+        self, lavfi_audio, encoder, sample_fmt, codec_name, expected_fmt, bits_per_sample, bits_per_raw_sample, expected
+    ):
+        path = lavfi_audio(encoder, sample_fmt=sample_fmt)
+        stream = probe(path).streams[0]
+        assert stream.is_audio
+        assert stream.codec_name == codec_name
+        assert stream.sample_fmt == expected_fmt
+        assert stream.bits_per_sample == bits_per_sample
+        assert stream.bits_per_raw_sample == bits_per_raw_sample
+        assert stream.bit_depth() == expected
+
+    def test_real_h264_video_stream_bit_depth(self, real_file: Path):
+        video = next(s for s in probe(real_file).streams if s.is_video)
+        assert video.sample_fmt is None
+        assert video.bits_per_sample is None
+        assert video.bits_per_raw_sample == "8"
+        assert video.bit_depth() == 8
 
 
 class TestFormat:

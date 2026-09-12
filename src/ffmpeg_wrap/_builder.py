@@ -5,14 +5,16 @@ import logging
 import subprocess
 import sys  # noqa: F401  # re-exported so tests can patch ``_builder.sys.stderr`` (the shared TeePump reads ``sys.stderr``)
 import threading
+import time
+from collections.abc import Callable
 from os import PathLike
 from pathlib import Path
 from typing import Any, Literal, overload
 
 from ffmpeg_wrap import _textio
-from ffmpeg_wrap._errors import FFmpegError, _build_ffmpeg_error
-from ffmpeg_wrap._probe import Stream
-from ffmpeg_wrap._textio import TeePump, decode_text
+from ffmpeg_wrap._errors import FFmpegError, _build_ffmpeg_error, _build_ffmpeg_timeout_error
+from ffmpeg_wrap._probe import Stream, _validate_timeout
+from ffmpeg_wrap._textio import TeePump, decode_error_stderr, decode_text
 
 logger = logging.getLogger("ffmpeg_wrap")
 
@@ -529,6 +531,7 @@ class FFmpeg:
         capture_stderr: bool = ...,
         *,
         text: Literal[False] = ...,
+        timeout: float | None = ...,
     ) -> tuple[bytes | None, bytes | None]: ...
 
     @overload
@@ -538,6 +541,7 @@ class FFmpeg:
         capture_stderr: bool = ...,
         *,
         text: Literal[True],
+        timeout: float | None = ...,
     ) -> tuple[str | None, str | None]: ...
 
     def run(
@@ -546,6 +550,7 @@ class FFmpeg:
         capture_stderr: bool = False,
         *,
         text: bool = False,
+        timeout: float | None = None,
     ) -> tuple[bytes | None, bytes | None] | tuple[str | None, str | None]:
         """Build and execute the FFmpeg command.
 
@@ -555,6 +560,9 @@ class FFmpeg:
             text: When True, decode stdout/stderr (and ``FFmpegError.stderr``)
                 as text using the platform default encoding; otherwise return
                 raw bytes.
+            timeout: Wall-clock limit in seconds, or ``None`` (the default) for
+                no limit. When it expires the child is killed and reaped, then
+                :class:`~ffmpeg_wrap.FFmpegTimeoutError` is raised.
 
         Returns:
             Tuple of (stdout, stderr). Values are ``str`` when ``text=True``
@@ -563,6 +571,8 @@ class FFmpeg:
 
         Raises:
             FFmpegError: If ffmpeg fails.
+            FFmpegTimeoutError: If ``timeout`` expires before ffmpeg exits.
+            ValueError: If ``timeout`` is not a positive finite number of at most 2147483.647 seconds.
 
         Example:
             ```python
@@ -579,6 +589,8 @@ class FFmpeg:
                 print(e.returncode, e.stderr)
             ```
         """
+        _validate_timeout(timeout)
+
         cmd = self.compile()
 
         stdout_dest = subprocess.PIPE if capture_stdout else None
@@ -595,6 +607,7 @@ class FFmpeg:
                         stderr=subprocess.PIPE,
                         check=True,
                         text=True,
+                        timeout=timeout,
                     )
                     return process_text.stdout, process_text.stderr
                 process_bytes = subprocess.run(
@@ -603,6 +616,7 @@ class FFmpeg:
                     stderr=subprocess.PIPE,
                     check=True,
                     text=False,
+                    timeout=timeout,
                 )
                 return process_bytes.stdout, process_bytes.stderr
             # Caller does not capture stderr: tee ffmpeg's stderr to the
@@ -610,10 +624,19 @@ class FFmpeg:
             # progress output of a bare ``run()``) while collecting it, so the
             # failure path can still populate ``FFmpegError.stderr`` without
             # silently buffering an entire successful run in memory.
-            stdout_data = self._run_tee(cmd, stdout_dest, text)
+            stdout_data = self._run_tee(cmd, stdout_dest, text, timeout)
             if isinstance(stdout_data, str):
                 return stdout_data, None
             return stdout_data, None
+        except subprocess.TimeoutExpired as e:
+            timeout_stderr = decode_error_stderr(e.stderr, text=text, encoding=locale.getpreferredencoding(False))
+            logger.error(f"FFmpeg command timed out after {e.timeout}s: {timeout_stderr or str(e)}")
+            raise _build_ffmpeg_timeout_error(
+                f"ffmpeg timed out after {e.timeout}s",
+                timeout=e.timeout,
+                stderr=timeout_stderr,
+                cmd=cmd,
+            ) from e
         except subprocess.CalledProcessError as e:
             if e.stderr is None:
                 stderr_text: str | None = None
@@ -640,6 +663,7 @@ class FFmpeg:
         capture_stderr: bool = ...,
         *,
         text: Literal[False] = ...,
+        timeout: float | None = ...,
     ) -> tuple[bytes | None, bytes | None]: ...
 
     @overload
@@ -649,6 +673,7 @@ class FFmpeg:
         capture_stderr: bool = ...,
         *,
         text: Literal[True],
+        timeout: float | None = ...,
     ) -> tuple[str | None, str | None]: ...
 
     async def arun(
@@ -657,6 +682,7 @@ class FFmpeg:
         capture_stderr: bool = False,
         *,
         text: bool = False,
+        timeout: float | None = None,
     ) -> tuple[bytes | None, bytes | None] | tuple[str | None, str | None]:
         """Build and execute the FFmpeg command asynchronously.
 
@@ -671,12 +697,16 @@ class FFmpeg:
             capture_stderr: Whether to capture stderr.
             text: When True, decode stdout/stderr (and ``FFmpegError.stderr``)
                 leniently as text using the platform default encoding.
+            timeout: Wall-clock limit in seconds, or ``None`` (the default) for
+                no limit; see :func:`ffmpeg_wrap.aio.run`.
 
         Returns:
             Tuple of (stdout, stderr); see :meth:`run`.
 
         Raises:
             FFmpegError: If ffmpeg fails or cannot be executed.
+            FFmpegTimeoutError: If ``timeout`` expires before ffmpeg exits.
+            ValueError: If ``timeout`` is not a positive finite number of at most 2147483.647 seconds.
             ImportError: If the optional ``[async]`` extra is not installed.
 
         Example:
@@ -697,16 +727,23 @@ class FFmpeg:
         """
         from ffmpeg_wrap import aio
 
-        return await aio.run(self, capture_stdout, capture_stderr, text=text)
+        return await aio.run(self, capture_stdout, capture_stderr, text=text, timeout=timeout)
 
     # Thin re-exports of the ``_textio`` versions so existing call sites and
     # any tests referencing ``FFmpeg._decode_text`` / ``FFmpeg._STDERR_TAIL_BYTES``
     # keep working. The single source of truth lives in ``_textio``.
+    _TIMEOUT_JOIN_SECONDS = 5.0
+    _DRAIN_GRACE_SECONDS = 1.0
     _STDERR_TAIL_BYTES = _textio.STDERR_TAIL_BYTES
     _decode_text = staticmethod(decode_text)
 
     @staticmethod
-    def _run_tee(cmd: list[str], stdout_dest: int | None, text: bool) -> bytes | str | None:
+    def _run_tee(
+        cmd: list[str],
+        stdout_dest: int | None,
+        text: bool,
+        timeout: float | None = None,
+    ) -> bytes | str | None:
         """Run ``cmd`` forwarding stderr to the terminal while collecting it.
 
         The child runs in binary mode so the pump can forward stderr in fixed
@@ -716,40 +753,97 @@ class FFmpeg:
         it until EOF; chunked reads preserve the live progress of a bare
         ``run()``. Only a bounded tail of stderr is retained (in the shared
         :class:`~ffmpeg_wrap._textio.TeePump`), and it is decoded and joined
-        solely on the failure path — successful runs keep memory flat. On a
-        non-zero exit raises ``CalledProcessError`` carrying the collected
-        stderr (and stdout) so the caller can build ``FFmpegError``.
+        solely on the failure path — successful runs keep memory flat. A piped
+        stdout is drained by a second thread so the calling thread can wait on
+        the child with ``timeout``; on expiry the child is killed and reaped,
+        the drain threads get a bounded join, and ``TimeoutExpired`` is raised
+        with the collected stderr tail. When the child exits in time the drains
+        are joined until the same deadline plus a short grace, so the last
+        pipe-buffered chunks of a child that finished just before the limit are
+        still collected, while a descendant that inherited a pipe and outlives
+        the child is reported as expiry: ``timeout`` bounds the whole call
+        rather than just the child's lifetime. Each pipe is closed only by the
+        thread that reads it, so a drain still blocked on such a grandchild, or
+        on a stuck stderr sink, cannot stall the raise; a drain that fails
+        closes its pipe regardless and its exception is re-raised here once the
+        child has been reaped. On a non-zero exit raises ``CalledProcessError``
+        carrying the collected stderr (and stdout) so the caller can build
+        ``FFmpegError``.
         """
         encoding = locale.getpreferredencoding(False)
         pump_state = TeePump(encoding)
+        stdout_buffer = bytearray()
 
-        def _pump(stream: Any) -> None:
+        drain_errors: list[BaseException] = []
+
+        def _drain(stream: Any, sink: Callable[[bytes], object]) -> None:
             # Only the read loop lives here; per-chunk forwarding + bounded-tail
             # bookkeeping are owned by the shared ``TeePump`` (same code the
-            # async tee task feeds).
+            # async tee task feeds), and a piped stdout accumulates in
+            # ``stdout_buffer``.
             reader = stream.read1 if hasattr(stream, "read1") else stream.read
-            while True:
-                chunk = reader(65536)
-                if not chunk:
-                    break
-                pump_state.feed(chunk)
-            stream.close()
+            try:
+                while True:
+                    chunk = reader(65536)
+                    if not chunk:
+                        break
+                    sink(chunk)
+            except BaseException as e:
+                drain_errors.append(e)
+            finally:
+                stream.close()
 
-        with subprocess.Popen(cmd, stdout=stdout_dest, stderr=subprocess.PIPE) as process:
-            pump = threading.Thread(target=_pump, args=(process.stderr,), daemon=True)
-            pump.start()
-            stdout_data = process.stdout.read() if process.stdout is not None else None
+        timed_out_after: float | None = None
+        process = subprocess.Popen(cmd, stdout=stdout_dest, stderr=subprocess.PIPE)
+        targets: list[tuple[Any, Callable[[bytes], object]]] = [(process.stderr, pump_state.feed)]
+        if process.stdout is not None:
+            targets.append((process.stdout, stdout_buffer.extend))
+        drains: list[threading.Thread] = []
+        started = time.monotonic()
+        try:
+            for stream, sink in targets:
+                drain = threading.Thread(target=_drain, args=(stream, sink), daemon=True)
+                drain.start()
+                drains.append(drain)
+            process.wait(timeout=timeout)
+        except subprocess.TimeoutExpired as e:
+            timed_out_after = e.timeout
+            process.kill()
             process.wait()
-            pump.join()
+            join_deadline = time.monotonic() + FFmpeg._TIMEOUT_JOIN_SECONDS
+            for drain in drains:
+                drain.join(timeout=max(0.0, join_deadline - time.monotonic()))
+        except BaseException:
+            process.kill()
+            process.wait()
+            for stream, _ in targets[len(drains) :]:
+                stream.close()
+            raise
+        else:
+            if timeout is None:
+                for drain in drains:
+                    drain.join()
+            else:
+                join_deadline = max(started + timeout, time.monotonic() + FFmpeg._DRAIN_GRACE_SECONDS)
+                for drain in drains:
+                    drain.join(timeout=max(0.0, join_deadline - time.monotonic()))
+                    if drain.is_alive():
+                        timed_out_after = timeout
+                        break
 
+        if drain_errors:
+            raise drain_errors[0]
+        stdout_data: bytes | str | None = bytes(stdout_buffer) if process.stdout is not None else None
         # The returned stdout and ``FFmpegError.stderr`` mirror
         # ``subprocess.run(text=True)`` (see ``decode_text``): platform-default
         # encoding with universal-newline translation, leniently decoded.
         if text and isinstance(stdout_data, bytes):
             stdout_data = decode_text(stdout_data, encoding)
-        if process.returncode:
+        if timed_out_after is not None or process.returncode:
             stderr_bytes = pump_state.tail_bytes()
             stderr_data: bytes | str = decode_text(stderr_bytes, encoding) if text else stderr_bytes
+            if timed_out_after is not None:
+                raise subprocess.TimeoutExpired(cmd, timed_out_after, output=stdout_data, stderr=stderr_data or None)
             raise subprocess.CalledProcessError(process.returncode, cmd, output=stdout_data, stderr=stderr_data)
         return stdout_data
 

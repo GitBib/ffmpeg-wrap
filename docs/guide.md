@@ -22,6 +22,30 @@ if result.format:
 
 `probe()` raises `FFmpegError` on subprocess failure or invalid output.
 
+### Bit depth
+
+`Stream` carries the three raw fields ffprobe reports for sample width
+(`sample_fmt`, `bits_per_sample`, `bits_per_raw_sample`), and `bit_depth()`
+resolves them the way ffprobe populates them: `bits_per_raw_sample` when it is
+present and numeric, else a positive `bits_per_sample`, else `None`:
+
+```python
+for stream in result.streams:
+    if stream.is_audio:
+        print(stream.sample_fmt, stream.bits_per_sample, stream.bits_per_raw_sample)
+        print(stream.bit_depth())
+```
+
+The value is the width ffprobe reports and says nothing about lossiness.
+16-bit WAV and FLAC answer `16`; 24-bit PCM and FLAC answer `24`, although both
+report `sample_fmt="s32"`, which is why `sample_fmt` alone is not enough; IMA
+ADPCM answers `4` and µ-law answers `8` because those codecs have a real coded
+width; MP3 and Opus answer `None` because they carry no fixed width.
+
+Video streams answer their pixel bit depth, because ffprobe reports it in
+`bits_per_raw_sample` too: `8` for 8-bit H.264, `10` for `yuv420p10le`.
+`sample_fmt` and `bits_per_sample` stay `None` for video.
+
 ## Build and run a command
 
 Every chain starts at `ffmpeg.input(...)`, which returns the `FFmpeg` builder.
@@ -34,12 +58,7 @@ ffmpeg.input("input.mkv").output("output.mp4", c="copy").overwrite_output().run(
 Input/output options are passed as keyword arguments:
 
 ```python
-(
-    ffmpeg.input("input.mkv", ss=10, t=30)
-    .output("clip.mp4", vcodec="libx264", acodec="aac")
-    .overwrite_output()
-    .run()
-)
+ffmpeg.input("input.mkv", ss=10, t=30).output("clip.mp4", vcodec="libx264", acodec="aac").overwrite_output().run()
 ```
 
 Use `global_args()` for flags before the inputs, and `run(capture_stdout=...,
@@ -81,8 +100,10 @@ outputs to multiple files:
 (
     ffmpeg.input("input.mkv")
     .filter_complex("[0:v]split=2[full][thumb];[thumb]scale=320:-2[thumb]")
-    .output("full.mp4").map("[full]")
-    .output("thumb.mp4").map("[thumb]")
+    .output("full.mp4")
+    .map("[full]")
+    .output("thumb.mp4")
+    .map("[thumb]")
     .overwrite_output()
     .run()
 )
@@ -94,12 +115,7 @@ the portable `-filter_complex` option. It is mutually exclusive with
 `filter_complex()` at runtime, so use one or the other:
 
 ```python
-(
-    ffmpeg.input("input.mkv")
-    .filter_complex_script("graph.txt")
-    .output("output.mp4")
-    .run()
-)
+ffmpeg.input("input.mkv").filter_complex_script("graph.txt").output("output.mp4").run()
 # ffmpeg -filter_complex "<contents of graph.txt>" -i input.mkv output.mp4
 ```
 
@@ -115,8 +131,9 @@ graph = f"subtitles={ffmpeg.filter_arg_escape(path)}"
 ## Validate a media file
 
 `validate()` checks whether a file is valid media and returns a `(ok, stderr)`
-tuple instead of raising on bad media. It only raises `FFmpegError` when the
-ffprobe executable itself could not be run.
+tuple instead of raising on bad media. It raises `FFmpegError` only when the
+ffprobe executable itself could not be run, or `FFmpegTimeoutError` when a
+`timeout=` expires (see [Timeouts](#timeouts)).
 
 ```python
 ok, stderr = ffmpeg.validate("video.mkv")
@@ -145,14 +162,7 @@ Request a hardware acceleration backend with `hwaccel()` (emits `-hwaccel`
 before the input's `-i`):
 
 ```python
-(
-    ffmpeg.input("input.mkv")
-    .hwaccel("cuda")
-    .output("output.mp4")
-    .codec("v", video_codec)
-    .overwrite_output()
-    .run()
-)
+ffmpeg.input("input.mkv").hwaccel("cuda").output("output.mp4").codec("v", video_codec).overwrite_output().run()
 ```
 
 ## Error handling
@@ -173,3 +183,46 @@ except ffmpeg.FFmpegError as e:
 
 This is the building block for consumer-side retry policies: the wrapper stays
 unopinionated about which failures are retryable.
+
+## Timeouts
+
+`run()`, `probe()` and `validate()` accept a keyword-only `timeout` in seconds;
+`None`, the default, means no limit. When it expires the child is killed,
+reaped, and `FFmpegTimeoutError` is raised:
+
+```python
+try:
+    ffmpeg.input("input.mkv").output("output.mp4", c="copy").overwrite_output().run(timeout=60)
+except ffmpeg.FFmpegTimeoutError as e:
+    print(f"gave up after {e.timeout}s: {e.stderr}")
+
+result = ffmpeg.probe("video.mkv", timeout=10)
+ok, stderr = ffmpeg.validate("video.mkv", timeout=10)
+```
+
+`FFmpegTimeoutError` subclasses `FFmpegError`, so `except FFmpegError` keeps
+catching it. It carries `timeout` (the limit that expired), `cmd`, and
+`stderr`: the tail collected before the kill, decoded the same way the failure
+path decodes it, so it is `str | None` in both text modes. `returncode` is
+always `None`, because the run did not complete within the limit and a kill
+status is not an ffmpeg exit code. A `timeout` that is not a positive finite number, or one above 2147483.647 seconds (the largest
+value the subprocess timers accept on every platform), raises `ValueError` before any process starts.
+
+The kill applies to the process launched from `ffmpeg_path` (or
+`ffprobe_path`); descendants of a wrapper script are not killed. Without
+`capture_stderr=True` the limit also bounds the whole call rather than just
+ffmpeg's lifetime: the wrapper keeps draining ffmpeg's stdout and stderr until
+they close, so a background process that a wrapper script leaves holding either
+pipe turns into `FFmpegTimeoutError` once the deadline, plus a one-second grace
+for the last buffered output, has passed, even though ffmpeg itself exited and
+nothing was killed. After a kill the wrapper waits up to five seconds for the
+forwarding threads before raising.
+
+!!! note "The timeout bounds ffmpeg, not your stderr sink"
+    Without `capture_stderr=True`, ffmpeg's stderr is forwarded live to the
+    inherited `sys.stderr` with a synchronous write. If that sink itself blocks
+    (a full pipe nobody reads, a stopped terminal), the timeout cannot
+    interrupt the write in progress: after the kill the wrapper waits a bounded
+    time for the forwarding thread and raises regardless, but the blocked write
+    is not unblocked. Callers with a slow or blocking stderr sink should pass
+    `capture_stderr=True`, which sends stderr to a buffer instead.

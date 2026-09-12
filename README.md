@@ -33,10 +33,13 @@ import ffmpeg_wrap as ffmpeg
 # Probe a file into typed structures
 result = ffmpeg.probe("video.mkv")
 for stream in result.streams:
-    print(stream.codec_name, stream.codec_type)
+    print(stream.codec_name, stream.codec_type, stream.bit_depth())
 
 # Build and run a command with the fluent builder
 ffmpeg.input("input.mkv").output("output.mp4", c="copy").overwrite_output().run()
+
+# Bound the wall-clock time; FFmpegTimeoutError is raised after ffmpeg is killed
+ffmpeg.input("input.mkv").output("output.mp4", c="copy").overwrite_output().run(timeout=60)
 ```
 
 ### Async
@@ -75,9 +78,9 @@ Full documentation, including guides and the complete API reference, is hosted a
 
 - **[Guide](https://gitbib.github.io/ffmpeg-wrap/guide/)** — a walkthrough of the
   synchronous API: probing files, building and running commands, mapping streams,
-  complex filtergraphs, validation, encoder discovery, and error handling.
+  complex filtergraphs, validation, encoder discovery, timeouts, and error handling.
 - **[Async API](https://gitbib.github.io/ffmpeg-wrap/async/)** — the AnyIO-backed
-  asynchronous mirror, backend choice (asyncio or trio), and bounding concurrency.
+  asynchronous mirror, backend choice (asyncio or trio), timeouts, and bounding concurrency.
 - **[API Reference](https://gitbib.github.io/ffmpeg-wrap/reference/sync/)** — the
   auto-generated reference for every public function, builder method, and model.
 
@@ -91,3 +94,7 @@ uv run ty check
 uv run pytest
 prek run --all-files
 ```
+
+CI additionally runs `make test` (downloads the real media fixtures once and
+runs the integration tests) and `make test-platform` (the timeout suites, which
+fail if any test is skipped).

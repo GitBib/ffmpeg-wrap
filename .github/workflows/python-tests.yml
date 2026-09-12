@@ -16,6 +16,7 @@ permissions:
 jobs:
   run:
     strategy:
+      fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
         python-version: ['3.10', '3.11', '3.12', '3.13', '3.14']
@@ -39,7 +40,7 @@ jobs:
         run: choco install -y --no-progress ffmpeg
 
       - name: Verify ffmpeg installation
-        run: ffmpeg -version
+        run: ffmpeg -version && ffprobe -version
         shell: bash
 
       - name: Install uv
@@ -55,6 +56,10 @@ jobs:
 
       - name: Download real media and run tests
         run: uv run --frozen make
+        shell: bash
+
+      - name: Run the timeout suite with the skip gate
+        run: uv run --frozen make test-platform
         shell: bash
 
   runtime-import:

@@ -36,3 +36,5 @@ docstrings via [mkdocstrings](https://mkdocstrings.github.io/).
 ## Errors
 
 ::: ffmpeg_wrap.FFmpegError
+
+::: ffmpeg_wrap.FFmpegTimeoutError

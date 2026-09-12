@@ -9,10 +9,17 @@ anywhere with no setup.
 
 from __future__ import annotations
 
+import contextlib
+import os
 import shutil
 import subprocess
+import sys
+import time
+from collections.abc import Callable, Iterator
+from dataclasses import dataclass
 from pathlib import Path
 
+import psutil
 import pytest
 
 import ffmpeg_wrap as ffmpeg
@@ -20,6 +27,20 @@ import ffmpeg_wrap as ffmpeg
 TESTS_DIR = Path(__file__).parent
 REAL_FILE = TESTS_DIR / "file.mkv"
 REAL_FILE_TWO = TESTS_DIR / "file_2.mkv"
+FAKE_CHILD = TESTS_DIR / "fake_child.py"
+FAKE_SITE = TESTS_DIR / "fake_site"
+FAKE_CHILD_ENV = (
+    "FAKE_CHILD_PIDFILE",
+    "FAKE_CHILD_MARKER",
+    "FAKE_CHILD_STDERR",
+    "FAKE_CHILD_STDOUT_BYTES",
+    "FAKE_CHILD_SLEEP",
+    "FAKE_CHILD_SPAWN",
+    "FAKE_CHILD_DETACH",
+    "FAKE_CHILD_EXIT",
+)
+CHILD_GONE_DEADLINE = 5.0
+PID_REUSE_SLACK = 2.0
 
 
 def pytest_configure(config: pytest.Config) -> None:
@@ -105,6 +126,27 @@ def mkv_with_subs(real_file: Path, srt_file: Path, tmp_path: Path) -> Path:
     return out
 
 
+_LAVFI_AUDIO_SUFFIXES = {"flac": ".flac", "libmp3lame": ".mp3", "libopus": ".opus"}
+
+
+@pytest.fixture
+def lavfi_audio(ffmpeg_available: None, tmp_path: Path) -> Callable[..., Path]:
+    def make(codec: str, sample_fmt: str | None = None, sample_rate: int = 48000) -> Path:
+        if not ffmpeg.has_encoder(codec):
+            pytest.skip(f"ffmpeg built without the {codec} encoder")
+        out = tmp_path / f"{codec}-{sample_fmt or 'default'}{_LAVFI_AUDIO_SUFFIXES.get(codec, '.wav')}"
+        (
+            ffmpeg.input(f"anullsrc=r={sample_rate}:cl=mono", f="lavfi", t=1)
+            .output(str(out), ar=sample_rate, sample_fmt=sample_fmt)
+            .codec("a", codec)
+            .overwrite_output()
+            .run(capture_stderr=True)
+        )
+        return out
+
+    return make
+
+
 @pytest.fixture(scope="session")
 def subtitles_filter_available(ffmpeg_available: None) -> None:
     """Skip unless this ffmpeg build has the ``subtitles`` filter (needs libass)."""
@@ -116,3 +158,139 @@ def subtitles_filter_available(ffmpeg_available: None) -> None:
     )
     if " subtitles " not in result.stdout:
         pytest.skip("ffmpeg built without the subtitles filter (no libass)")
+
+
+def started_child_pid(pidfile: Path, *, deadline_s: float = CHILD_GONE_DEADLINE) -> int | None:
+    deadline = time.monotonic() + deadline_s
+    while True:
+        text = pidfile.read_text(encoding="utf-8").strip() if pidfile.exists() else ""
+        if text:
+            return int(text.split()[0])
+        if time.monotonic() > deadline:
+            return None
+        time.sleep(0.01)
+
+
+def child_pid(pidfile: Path, *, deadline_s: float = CHILD_GONE_DEADLINE) -> int:
+    pid = started_child_pid(pidfile, deadline_s=deadline_s)
+    if pid is None:
+        raise AssertionError(f"fake child never wrote its pid to {pidfile}")
+    return pid
+
+
+def child_pids(pidfile: Path, *, deadline_s: float = CHILD_GONE_DEADLINE) -> tuple[int, int]:
+    child_pid(pidfile, deadline_s=deadline_s)
+    pid, ppid = pidfile.read_text(encoding="utf-8").split()
+    return int(pid), int(ppid)
+
+
+def assert_spawned_by(pidfile: Path, proc: subprocess.Popen[bytes] | subprocess.Popen[str]) -> int:
+    pid, ppid = child_pids(pidfile)
+    assert proc.pid in (pid, ppid), f"fake child pid {pid} (parent {ppid}) was not spawned by Popen pid {proc.pid}"
+    return pid
+
+
+def _live_child(pid: int, pidfile: Path) -> psutil.Process | None:
+    try:
+        proc = psutil.Process(pid)
+        if proc.status() == psutil.STATUS_ZOMBIE:
+            return None
+        if proc.create_time() > pidfile.stat().st_mtime + PID_REUSE_SLACK:
+            return None
+    except (psutil.NoSuchProcess, psutil.ZombieProcess, psutil.AccessDenied):
+        return None
+    return proc
+
+
+def child_alive(pidfile: Path) -> bool:
+    return _live_child(child_pid(pidfile), pidfile) is not None
+
+
+def assert_child_gone(
+    pidfile: Path,
+    marker: Path,
+    sleep_s: float = 5.0,
+    *,
+    deadline_s: float = CHILD_GONE_DEADLINE,
+) -> None:
+    pid = started_child_pid(pidfile, deadline_s=deadline_s)
+    if pid is None:
+        assert not marker.exists(), f"fake child wrote {marker} without ever writing its pid"
+        return
+    deadline = time.monotonic() + deadline_s
+    while _live_child(pid, pidfile) is not None:
+        if time.monotonic() > deadline:
+            raise AssertionError(f"fake child pid {pid} is still alive {deadline_s}s after the timeout")
+        time.sleep(0.05)
+    assert not marker.exists(), f"fake child pid {pid} finished its {sleep_s}s sleep on its own instead of being killed"
+
+
+def assert_child_reaped(pidfile: Path, *, deadline_s: float = CHILD_GONE_DEADLINE) -> None:
+    pid = started_child_pid(pidfile, deadline_s=deadline_s)
+    if pid is None:
+        return
+    if sys.platform == "win32":
+        deadline = time.monotonic() + deadline_s
+        while psutil.pid_exists(pid):
+            assert time.monotonic() < deadline, f"pid {pid} still exists {deadline_s}s after the timeout"
+            time.sleep(0.05)
+    else:
+        with pytest.raises(ProcessLookupError):
+            os.kill(pid, 0)
+
+
+def kill_leftover_child(pidfile: Path) -> None:
+    if not pidfile.exists():
+        return
+    text = pidfile.read_text(encoding="utf-8").strip()
+    if not text:
+        return
+    proc = _live_child(int(text.split()[0]), pidfile)
+    if proc is None:
+        return
+    with contextlib.suppress(psutil.NoSuchProcess, psutil.TimeoutExpired):
+        proc.kill()
+        proc.wait(CHILD_GONE_DEADLINE)
+
+
+@dataclass
+class FakeChild:
+    pidfile: Path
+    marker: Path
+    monkeypatch: pytest.MonkeyPatch
+
+    def set_env(self, **env: object) -> None:
+        for key, value in env.items():
+            self.monkeypatch.setenv(key, str(value))
+
+    def make(self, **env: object) -> ffmpeg.FFmpeg:
+        self.set_env(**env)
+        return ffmpeg.FFmpeg(ffmpeg_path=sys.executable).global_args(str(FAKE_CHILD))
+
+    def alive(self) -> bool:
+        return child_alive(self.pidfile)
+
+    def assert_gone(self, sleep_s: float = 5.0) -> None:
+        assert_child_gone(self.pidfile, self.marker, sleep_s)
+
+    def assert_reaped(self) -> None:
+        assert_child_reaped(self.pidfile)
+
+
+@pytest.fixture
+def fake_child(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[FakeChild]:
+    for name in FAKE_CHILD_ENV:
+        monkeypatch.delenv(name, raising=False)
+    pidfile = tmp_path / "child.pid"
+    marker = tmp_path / "child.marker"
+    monkeypatch.setenv("FAKE_CHILD_PIDFILE", str(pidfile))
+    monkeypatch.setenv("FAKE_CHILD_MARKER", str(marker))
+    yield FakeChild(pidfile, marker, monkeypatch)
+    kill_leftover_child(pidfile)
+
+
+@pytest.fixture
+def fake_ffprobe(fake_child: FakeChild) -> str:
+    assert (FAKE_SITE / "sitecustomize.py").is_file()
+    fake_child.monkeypatch.setenv("PYTHONPATH", str(FAKE_SITE))
+    return sys.executable

@@ -554,8 +554,8 @@ class TestInputHelper:
 
 
 def _popen_cm(returncode=0, stderr=b"", stdout=None):
-    """Build a MagicMock standing in for ``subprocess.Popen`` used as a
-    context manager by ``FFmpeg._run_tee`` (the non-capture-stderr path).
+    """Build a MagicMock standing in for the ``subprocess.Popen`` object
+    ``FFmpeg._run_tee`` (the non-capture-stderr path) drives directly.
 
     The child always runs in binary mode, so stderr/stdout are byte streams."""
     process = MagicMock()
@@ -563,10 +563,7 @@ def _popen_cm(returncode=0, stderr=b"", stdout=None):
     process.stdout = io.BytesIO(stdout) if stdout is not None else None
     process.returncode = returncode
     process.wait = MagicMock()
-    cm = MagicMock()
-    cm.__enter__.return_value = process
-    cm.__exit__.return_value = False
-    return cm
+    return process
 
 
 class TestRun:
@@ -773,10 +770,7 @@ class TestRun:
         process.stderr = _ChunkStream(progress)
         process.stdout = None
         process.returncode = 0
-        cm = MagicMock()
-        cm.__enter__.return_value = process
-        cm.__exit__.return_value = False
-        mock_popen.return_value = cm
+        mock_popen.return_value = process
         sink = mock_stderr.buffer
 
         ff = FFmpeg()
