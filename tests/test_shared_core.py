@@ -7,6 +7,8 @@ unchanged (stderr/returncode/cmd).
 
 import collections
 import subprocess
+import threading
+import time
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -120,6 +122,28 @@ class TestTeePump:
                 pump.feed(chunk)
         assert pump.tail_bytes() == expected
 
+    def test_tail_bytes_is_safe_while_another_thread_feeds(self):
+        fake_stderr = MagicMock()
+        with patch("ffmpeg_wrap._textio.sys.stderr", fake_stderr):
+            pump = TeePump("utf-8", tail_limit=64)
+        stop = threading.Event()
+
+        def feed():
+            while not stop.is_set():
+                pump.feed(b"x" * 40)
+
+        worker = threading.Thread(target=feed, daemon=True)
+        worker.start()
+        try:
+            deadline = time.monotonic() + 0.3
+            while time.monotonic() < deadline:
+                assert len(pump.tail_bytes()) <= 80
+        finally:
+            stop.set()
+            worker.join(timeout=5)
+        assert not worker.is_alive()
+        assert len(pump.tail_bytes()) <= 80
+
     def test_feed_swallows_sink_write_errors(self):
         fake_stderr = MagicMock()
         fake_stderr.buffer.write.side_effect = OSError("pipe closed")
@@ -189,10 +213,7 @@ class TestSyncErrorParity:
         process.stderr.read1.side_effect = [b"boom stderr", b""]
         process.stdout = None
         process.returncode = 3
-        cm = MagicMock()
-        cm.__enter__.return_value = process
-        cm.__exit__.return_value = False
-        mock_popen.return_value = cm
+        mock_popen.return_value = process
         ff = FFmpeg().input("in.mkv").output("out.mp4")
         with patch("ffmpeg_wrap._builder.sys.stderr", MagicMock()), pytest.raises(FFmpegError) as exc:
             ff.run()

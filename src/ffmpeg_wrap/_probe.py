@@ -1,4 +1,6 @@
+import contextlib
 import logging
+import math
 import subprocess
 import sys
 from os import PathLike
@@ -17,9 +19,12 @@ else:  # Python 3.10: StrEnum was added in 3.11
 
 import msgspec
 
-from ffmpeg_wrap._errors import _build_ffmpeg_error
+from ffmpeg_wrap._errors import FFmpegTimeoutError, _build_ffmpeg_error, _build_ffmpeg_timeout_error
+from ffmpeg_wrap._textio import decode_error_stderr
 
 logger = logging.getLogger("ffmpeg_wrap")
+
+_TIMEOUT_MAX_SECONDS = (2**31 - 1) / 1000
 
 
 class CodecType(StrEnum):
@@ -199,6 +204,20 @@ class Stream(msgspec.Struct):
             :attr:`codec_type` group (the ``N`` in the ffmpeg specifier
             ``0:<type>:N``). Set by :func:`probe`; defaults to ``0`` when a
             ``Stream`` is constructed outside of :func:`probe`.
+        sample_fmt: Raw ffprobe sample format name (e.g. ``"s16"``, ``"s32"``,
+            ``"flt"``, ``"fltp"``). ``None`` for non-audio streams or when
+            not reported. It names the decoded sample layout, not the stored
+            width: 24-bit PCM and 24-bit FLAC both report ``"s32"``.
+        bits_per_sample: Coded sample width as ffprobe's integer field
+            (e.g. ``16`` for ``pcm_s16le``, ``4`` for ``adpcm_ima_wav``,
+            ``8`` for ``pcm_mulaw``). ``0`` when the codec has no fixed
+            width (FLAC, MP3, Opus); ``None`` when not reported.
+        bits_per_raw_sample: Significant bits per decoded sample, as the
+            string ffprobe emits (e.g. ``"24"`` for 24-bit PCM or FLAC,
+            ``"16"`` for 16-bit FLAC). Also set on video streams as the
+            pixel bit depth (``"8"`` for 8-bit H.264, ``"10"`` for 10-bit).
+            Absent (``None``) on most other audio codecs. Prefer
+            :meth:`bit_depth` over reading the raw fields.
 
     Example:
         ```python
@@ -225,6 +244,39 @@ class Stream(msgspec.Struct):
     # ffmpeg specifier ``0:s:N``). Populated by ``probe()``; defaults to 0 when
     # a ``Stream`` is constructed or decoded outside of ``probe()``.
     type_index: int = 0
+    sample_fmt: str | None = None
+    bits_per_sample: int | None = None
+    bits_per_raw_sample: str | None = None
+
+    def bit_depth(self) -> int | None:
+        """Return the sample width in bits that ffprobe reports.
+
+        ``int(bits_per_raw_sample)`` when numeric and positive, else a positive
+        ``bits_per_sample``, else ``None``. Says nothing about lossiness:
+        ``adpcm_ima_wav`` answers ``4``, ``pcm_mulaw`` ``8``, MP3 and Opus ``None``;
+        video streams answer their pixel bit depth.
+
+        Returns:
+            The bit depth, or ``None`` when ffprobe reports no fixed width.
+
+        Example:
+            ```python
+            from ffmpeg_wrap import probe
+
+            result = probe("audio.flac")
+            audio = next(s for s in result.streams if s.is_audio)
+            print(audio.bit_depth())  # e.g. 24
+            ```
+        """
+        raw = self.bits_per_raw_sample
+        if raw is not None:
+            with contextlib.suppress(ValueError):
+                if (depth := int(raw)) > 0:
+                    return depth
+        coded = self.bits_per_sample
+        if coded is not None and coded > 0:
+            return coded
+        return None
 
     def map_specifier(self, input_index: int = 0) -> str:
         """Return the ffmpeg ``-map`` specifier for this stream.
@@ -525,6 +577,14 @@ def _assign_type_indices(streams: list[Stream]) -> None:
         counters[stream.codec_type] = ordinal + 1
 
 
+def _validate_timeout(timeout: float | None) -> None:
+    if timeout is not None and (timeout <= 0 or timeout > _TIMEOUT_MAX_SECONDS or not math.isfinite(timeout)):
+        raise ValueError(
+            f"timeout must be a positive finite number of seconds no greater than {_TIMEOUT_MAX_SECONDS} or None, "
+            f"got {timeout!r}"
+        )
+
+
 def _build_validate_cmd(
     filename: str | PathLike[str],
     ffprobe_path: str = "ffprobe",
@@ -591,11 +651,24 @@ def _parse_probe_output(stdout: bytes, cmd: list[str]) -> ProbeResult:
     return parsed
 
 
+def _probe_timeout_error(cmd: list[str], e: subprocess.TimeoutExpired) -> FFmpegTimeoutError:
+    stderr_text = decode_error_stderr(e.stderr, text=False, encoding="utf-8")
+    logger.error(f"ffprobe timed out after {e.timeout}s: {stderr_text or str(e)}")
+    return _build_ffmpeg_timeout_error(
+        f"ffprobe timed out after {e.timeout}s",
+        timeout=e.timeout,
+        stderr=stderr_text,
+        cmd=cmd,
+    )
+
+
 def validate(
     filename: str | PathLike[str],
     ffprobe_path: str = "ffprobe",
     loglevel: str = "warning",
     extra_args: tuple[str, ...] = (),
+    *,
+    timeout: float | None = None,
 ) -> tuple[bool, str]:
     """Run ffprobe in validation mode and report diagnostics.
 
@@ -614,6 +687,9 @@ def validate(
         extra_args: Additional raw arguments forwarded to ffprobe before the
             filename, e.g. ``("-show_format",)``. Use with care; no validation
             is performed on these args.
+        timeout: Wall-clock limit in seconds, or ``None`` (the default) for
+            no limit. When it expires the child is killed and reaped, then
+            :class:`~ffmpeg_wrap.FFmpegTimeoutError` is raised.
 
     Returns:
         ``(ok, stderr_text)`` where ``ok`` is ``True`` iff the ffprobe exit
@@ -621,11 +697,12 @@ def validate(
         raw decoded stderr (never ``None``, possibly an empty string).
 
     Raises:
-        FFmpegError: Only when the ffprobe executable itself cannot be run
+        FFmpegError: When the ffprobe executable itself cannot be run
             (e.g. not found on ``PATH``). A corrupt or unreadable media file
             does *not* raise — it returns ``(False, stderr_text)``.
+        FFmpegTimeoutError: If ``timeout`` expires before ffprobe exits.
         ValueError: If ``loglevel`` is not a recognised ffprobe loglevel
-            keyword.
+            keyword, or if ``timeout`` is not a positive finite number of at most 2147483.647 seconds.
 
     Example:
         ```python
@@ -636,21 +713,32 @@ def validate(
             print("Validation failed:", diag)
         ```
     """
+    _validate_timeout(timeout)
     cmd = _build_validate_cmd(filename, ffprobe_path, loglevel, extra_args)
     try:
-        result = subprocess.run(cmd, capture_output=True, check=False, text=False)
+        result = subprocess.run(cmd, capture_output=True, check=False, text=False, timeout=timeout)
+    except subprocess.TimeoutExpired as e:
+        raise _probe_timeout_error(cmd, e) from e
     except OSError as e:
         logger.error(f"ffprobe could not be executed: {e}")
         raise _build_ffmpeg_error(f"ffprobe could not be executed: {e}", cmd=cmd) from e
     return _interpret_validate(result.returncode, result.stderr)
 
 
-def probe(filename: str | PathLike[str], ffprobe_path: str = "ffprobe") -> ProbeResult:
+def probe(
+    filename: str | PathLike[str],
+    ffprobe_path: str = "ffprobe",
+    *,
+    timeout: float | None = None,
+) -> ProbeResult:
     """Run ffprobe on the specified file and return typed output.
 
     Args:
         filename: Path to the file to probe.
         ffprobe_path: Path to the ffprobe executable.
+        timeout: Wall-clock limit in seconds, or ``None`` (the default) for
+            no limit. When it expires the child is killed and reaped, then
+            :class:`~ffmpeg_wrap.FFmpegTimeoutError` is raised.
 
     Returns:
         Parsed and typed :class:`ProbeResult` containing all streams and
@@ -658,6 +746,8 @@ def probe(filename: str | PathLike[str], ffprobe_path: str = "ffprobe") -> Probe
 
     Raises:
         FFmpegError: If ffprobe fails or the output cannot be parsed.
+        FFmpegTimeoutError: If ``timeout`` expires before ffprobe exits.
+        ValueError: If ``timeout`` is not a positive finite number of at most 2147483.647 seconds.
 
     Example:
         ```python
@@ -669,6 +759,7 @@ def probe(filename: str | PathLike[str], ffprobe_path: str = "ffprobe") -> Probe
             print(stream.index, stream.codec_type, stream.codec_name)
         ```
     """
+    _validate_timeout(timeout)
     cmd = _build_probe_cmd(filename, ffprobe_path)
     try:
         result = subprocess.run(
@@ -676,7 +767,10 @@ def probe(filename: str | PathLike[str], ffprobe_path: str = "ffprobe") -> Probe
             capture_output=True,
             check=True,
             text=False,
+            timeout=timeout,
         )
+    except subprocess.TimeoutExpired as e:
+        raise _probe_timeout_error(cmd, e) from e
     except subprocess.CalledProcessError as e:
         stderr_text = e.stderr.decode("utf-8", errors="replace") if e.stderr else None
         err_msg = stderr_text or str(e)

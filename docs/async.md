@@ -31,12 +31,7 @@ from ffmpeg_wrap import input
 
 
 async def main():
-    await (
-        input("input.mkv")
-        .output("output.mp4", c="copy")
-        .overwrite_output()
-        .arun()
-    )
+    await input("input.mkv").output("output.mp4", c="copy").overwrite_output().arun()
 
 
 anyio.run(main)
@@ -104,6 +99,63 @@ anyio.run(main, backend="trio")
     with a `CapacityLimiter` keeps the thread count flat. Trio avoids a
     per-process reaping thread, but it is not literally zero-thread.
 
+## Timeouts
+
+`arun()`, `aio.run()`, `aio.probe()` and `aio.validate()` accept the same
+keyword-only `timeout` (seconds, `None` for no limit) as their sync twins. The
+deadline covers the launch itself; when it expires the child is killed and
+reaped, then `FFmpegTimeoutError` is raised with the same message, `timeout`,
+`cmd`, `stderr` (`str | None`) and `returncode=None` as the sync path:
+
+```python
+import anyio
+
+from ffmpeg_wrap import FFmpegTimeoutError, aio, input
+
+
+async def main():
+    try:
+        await input("input.mkv").output("output.mp4", c="copy").overwrite_output().arun(timeout=60)
+    except FFmpegTimeoutError as e:
+        print(f"gave up after {e.timeout}s: {e.stderr}")
+
+    result = await aio.probe("video.mkv", timeout=10)
+    ok, stderr = await aio.validate("video.mkv", timeout=10)
+    print(len(result.streams), ok)
+
+
+anyio.run(main)
+```
+
+As in the sync API, the kill applies to the process launched from
+`ffmpeg_path` (or `ffprobe_path`) and never to descendants of a wrapper script.
+Without `capture_stderr=True` the deadline bounds the whole call: the pipes are
+drained until they close, so a background process left holding stdout or stderr
+turns into `FFmpegTimeoutError` at the deadline even though ffmpeg itself
+exited.
+
+On the async paths the stderr tail is only collected where stderr is teed:
+`arun()` and `aio.run()` without `capture_stderr=True` carry it, while
+`capture_stderr=True`, `aio.probe()` and `aio.validate()` discard the child's
+output when the deadline cancels the call, so `e.stderr` is `None` there. The
+sync API keeps the tail in every case.
+
+The keyword composes with AnyIO's own cancellation. Wrapping a call in your
+own `anyio.fail_after` / `anyio.move_on_after`, or cancelling the task group it
+runs in, kills and reaps the child the same way, but the exception you see is
+the one your scope produces (`TimeoutError` from `fail_after`, nothing from
+`move_on_after`), not `FFmpegTimeoutError`. Use `timeout=` when you want a
+structured error (with the ffmpeg stderr tail on the tee path); use your own
+scope when a whole batch shares one deadline. Both can be active at once, and the earlier
+deadline decides which exception you get.
+
+!!! note "The timeout bounds ffmpeg, not your stderr sink"
+    The same limit as the sync API applies. Without `capture_stderr=True`,
+    stderr is forwarded to `sys.stderr` with a blocking write on the event-loop
+    thread, and neither `timeout=` nor a cancel scope can interrupt a write
+    that is stuck on a full or stopped sink. Pass `capture_stderr=True` when
+    the sink may block.
+
 ## Bounding concurrency
 
 The library does not build a job queue — bound concurrency yourself with an
@@ -118,12 +170,7 @@ from ffmpeg_wrap import input
 
 async def transcode(name, limiter):
     async with limiter:
-        await (
-            input(f"{name}.mkv")
-            .output(f"{name}.mp4", c="copy")
-            .overwrite_output()
-            .arun()
-        )
+        await input(f"{name}.mkv").output(f"{name}.mp4", c="copy").overwrite_output().arun()
 
 
 async def main():

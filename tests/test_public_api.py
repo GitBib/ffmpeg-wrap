@@ -6,6 +6,7 @@ import ffmpeg_wrap as ffmpeg
 def test_all_names_accessible():
     """All public names are accessible via the package."""
     assert hasattr(ffmpeg, "FFmpegError")
+    assert hasattr(ffmpeg, "FFmpegTimeoutError")
     assert hasattr(ffmpeg, "Stream")
     assert hasattr(ffmpeg, "Format")
     assert hasattr(ffmpeg, "ProbeResult")
@@ -35,6 +36,10 @@ def test_ffmpeg_error_is_exception_subclass():
     assert issubclass(ffmpeg.FFmpegError, Exception)
 
 
+def test_ffmpeg_timeout_error_is_ffmpeg_error_subclass():
+    assert issubclass(ffmpeg.FFmpegTimeoutError, ffmpeg.FFmpegError)
+
+
 def test_validate_is_callable():
     """ffmpeg.validate is callable."""
     assert callable(ffmpeg.validate)
@@ -44,6 +49,7 @@ def test_all_exports_match():
     """__all__ contains all expected public names."""
     expected = {
         "FFmpegError",
+        "FFmpegTimeoutError",
         "Stream",
         "Format",
         "ProbeResult",

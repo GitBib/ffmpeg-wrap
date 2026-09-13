@@ -3,7 +3,7 @@ from typing import TYPE_CHECKING
 
 from ffmpeg_wrap._builder import FFmpeg, input
 from ffmpeg_wrap._encoders import encoders, has_encoder
-from ffmpeg_wrap._errors import FFmpegError
+from ffmpeg_wrap._errors import FFmpegError, FFmpegTimeoutError
 from ffmpeg_wrap._filters import filter_arg_escape
 from ffmpeg_wrap._probe import CodecType, Format, ProbeResult, Stream, probe, validate
 
@@ -24,6 +24,7 @@ __all__ = [
     "CodecType",
     "FFmpeg",
     "FFmpegError",
+    "FFmpegTimeoutError",
     "Format",
     "ProbeResult",
     "Stream",

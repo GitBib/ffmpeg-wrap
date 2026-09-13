@@ -1,6 +1,6 @@
 [project]
 name = "ffmpeg-wrap"
-version = "0.4.0"
+version = "0.5.0"
 description = "Typed fluent FFmpeg/ffprobe wrapper with msgspec models"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -41,6 +41,7 @@ dev = [
     "pytest-timeout>=2.3",
     "anyio>=4.14.2",
     "trio>=0.34.0",
+    "psutil>=7.2.2",
     "ty==0.0.74",
 ]
 docs = [
@@ -86,7 +87,7 @@ ignore = [
     "TC001", "TC002", "TC003",
     "ERA001", "B904", "PERF203", "SLF001",
     "N803", "N806", "N812",
-    "UP007", "RUF001", "ASYNC230",
+    "UP007", "RUF001", "ASYNC230", "ASYNC109",
 ]
 
 [tool.ruff.lint.per-file-ignores]
@@ -94,6 +95,7 @@ ignore = [
 "_builder.py" = ["A001", "A002", "A004"]
 "test_*.py" = ["T20", "ANN", "S", "ERA", "PLR", "ARG", "FBT", "SLF", "E402", "E501", "B007", "G"]
 "conftest.py" = ["ARG"]
+"tests/fake_site/sitecustomize.py" = ["E402"]
 
 [tool.ty.environment]
 python-version = "3.10"

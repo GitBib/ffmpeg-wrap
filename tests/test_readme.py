@@ -169,6 +169,22 @@ def test_hwaccel_input_kwarg_equivalent():
     ]
 
 
+def test_readme_run_timeout_keyword_documented():
+    params = inspect.signature(ffmpeg.FFmpeg.run).parameters
+    assert params["timeout"].kind is inspect.Parameter.KEYWORD_ONLY
+    assert params["timeout"].default is None
+    assert issubclass(ffmpeg.FFmpegTimeoutError, ffmpeg.FFmpegError)
+    err = ffmpeg.FFmpegTimeoutError("ffmpeg timed out after 60s", timeout=60, cmd=["ffmpeg"])
+    assert err.timeout == 60
+    assert err.returncode is None
+
+
+def test_readme_bit_depth_documented():
+    stream = ffmpeg.Stream(0, "flac", "audio", sample_fmt="s32", bits_per_sample=0, bits_per_raw_sample="24")
+    assert stream.bit_depth() == 24
+    assert ffmpeg.Stream(1, "mp3", "audio", sample_fmt="fltp", bits_per_sample=0).bit_depth() is None
+
+
 def test_error_handling_attributes_documented():
     """FFmpegError exposes returncode/stderr/cmd as the README recipe relies on."""
     err = ffmpeg.FFmpegError("ffmpeg error: boom", stderr="boom", returncode=1, cmd=["ffmpeg"])
@@ -228,7 +244,7 @@ def test_readme_arun_is_documented_coroutine():
     builder = ffmpeg.input("input.mkv").output("output.mp4", c="copy")
     assert inspect.iscoroutinefunction(builder.arun)
     params = inspect.signature(builder.arun).parameters
-    assert set(params) == {"capture_stdout", "capture_stderr", "text"}
+    assert set(params) == {"capture_stdout", "capture_stderr", "text", "timeout"}
 
 
 def test_readme_capacity_limiter_pattern_available():
