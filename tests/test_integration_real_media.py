@@ -16,6 +16,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from conftest import skip_unless_filter_script_form_supported, write_large_filtergraph
 
 import ffmpeg_wrap as ffmpeg
 
@@ -323,13 +324,17 @@ def test_loglevel_hide_banner_and_global_args(real_file: Path, tmp_path: Path) -
     assert len(ffmpeg.probe(out).streams) == 2
 
 
-def test_filter_complex_script_scales_video(real_file: Path, tmp_path: Path) -> None:
+@pytest.mark.parametrize("legacy", [False, True])
+def test_filter_complex_script_scales_video(
+    real_file: Path, tmp_path: Path, ffmpeg_major: int | None, legacy: bool
+) -> None:
+    skip_unless_filter_script_form_supported(ffmpeg_major, legacy=legacy)
     script = tmp_path / "graph.txt"
-    script.write_text("[0:v]scale=160:-2[v]", encoding="utf-8")
+    script.write_text("[0:v]scale=160:-2[v]\n", encoding="utf-8")
     out = tmp_path / "fcs.mkv"
     (
         ffmpeg.input(real_file, t=1)
-        .filter_complex_script(script)
+        .filter_complex_script(script, legacy=legacy)
         .output(str(out))
         .map("[v]")
         .map("0:a")
@@ -339,6 +344,36 @@ def test_filter_complex_script_scales_video(real_file: Path, tmp_path: Path) -> 
     )
     video = next(s for s in ffmpeg.probe(out).streams if s.is_video)
     assert video.width == 160
+
+
+def test_filter_complex_script_runs_graph_above_argv_limit(
+    real_file: Path, tmp_path: Path, ffmpeg_major: int | None
+) -> None:
+    skip_unless_filter_script_form_supported(ffmpeg_major, legacy=False)
+    script = write_large_filtergraph(tmp_path / "graph.txt")
+    (
+        ffmpeg.input(real_file, t=0.5)
+        .filter_complex_script(script)
+        .output("-", f="null")
+        .map("[a]")
+        .overwrite_output()
+        .run(capture_stderr=True)
+    )
+
+
+def test_filter_complex_script_legacy_runs_graph_above_argv_limit(
+    real_file: Path, tmp_path: Path, ffmpeg_major: int | None
+) -> None:
+    skip_unless_filter_script_form_supported(ffmpeg_major, legacy=True)
+    script = write_large_filtergraph(tmp_path / "graph.txt")
+    (
+        ffmpeg.input(real_file, t=0.5)
+        .filter_complex_script(script, legacy=True)
+        .output("-", f="null")
+        .map("[a]")
+        .overwrite_output()
+        .run(capture_stderr=True)
+    )
 
 
 def test_capture_stdout_pipe(real_file: Path) -> None:

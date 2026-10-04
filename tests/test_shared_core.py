@@ -158,7 +158,7 @@ class TestProbeBuildersAndParse:
     def test_build_probe_cmd_shape(self):
         cmd = _build_probe_cmd("in.mkv", "ffprobe")
         assert cmd[0] == "ffprobe"
-        assert cmd[1:7] == ["-v", "quiet", "-print_format", "json", "-show_format", "-show_streams"]
+        assert cmd[1:7] == ["-v", "quiet", "-of", "json", "-show_format", "-show_streams"]
         assert cmd[-1].endswith("in.mkv")
 
     def test_parse_probe_output_assigns_type_indices(self):
