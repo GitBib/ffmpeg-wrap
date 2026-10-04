@@ -62,6 +62,42 @@ jobs:
         run: uv run --frozen make test-platform
         shell: bash
 
+  pinned-ffmpeg:
+    name: Pinned ffmpeg ${{ matrix.ffmpeg }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        ffmpeg: ['8.1.1', '9.0.2']
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7.0.0
+
+      - name: Install static ffmpeg ${{ matrix.ffmpeg }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/ffmpeg"
+          cid=$(docker create mwader/static-ffmpeg:${{ matrix.ffmpeg }})
+          docker cp "$cid:/ffmpeg" "$RUNNER_TEMP/ffmpeg/ffmpeg"
+          docker cp "$cid:/ffprobe" "$RUNNER_TEMP/ffmpeg/ffprobe"
+          docker rm "$cid"
+          echo "$RUNNER_TEMP/ffmpeg" >> "$GITHUB_PATH"
+
+      - name: Verify ffmpeg installation
+        run: ffmpeg -version && ffprobe -version
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.2.0
+        with:
+          version: latest
+          python-version: '3.14'
+          enable-cache: true
+
+      - name: Install project
+        run: uv sync --all-extras --dev
+
+      - name: Download real media and run tests
+        run: uv run --frozen make
+
   runtime-import:
     name: Runtime-only import smoke test
     runs-on: ubuntu-latest

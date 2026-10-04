@@ -63,14 +63,14 @@ def test_filter_complex_fanout_snippet():
 
 
 def test_filter_complex_script_snippet(tmp_path: Path):
-    """filter_complex_script reads the graph from a file."""
+    """filter_complex_script hands ffmpeg the path of the graph file."""
     script = tmp_path / "graph.txt"
     script.write_text("[0:v]scale=320:-2[v]", encoding="utf-8")
     cmd = ffmpeg.input("input.mkv").filter_complex_script(script).output("output.mp4").compile()
     assert cmd == [
         "ffmpeg",
-        "-filter_complex",
-        "[0:v]scale=320:-2[v]",
+        "-/filter_complex",
+        str(script),
         "-i",
         "input.mkv",
         "output.mp4",

@@ -579,7 +579,8 @@ class TestProbeFunction:
         assert cmd[0] == "ffprobe"
         assert "-v" in cmd
         assert "quiet" in cmd
-        assert "-print_format" in cmd
+        assert "-of" in cmd
+        assert "-print_format" not in cmd
         assert "json" in cmd
         assert "-show_format" in cmd
         assert "-show_streams" in cmd

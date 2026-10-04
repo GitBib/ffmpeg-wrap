@@ -525,7 +525,7 @@ class Format(msgspec.Struct):
 class ProbeResult(msgspec.Struct):
     """Typed result of running :func:`probe` on a media file.
 
-    Top-level container decoded from ffprobe's ``-print_format json`` output.
+    Top-level container decoded from ffprobe's ``-of json`` output.
     Provides convenient access to all streams and the container format
     information in a single structured object.
 
@@ -624,7 +624,7 @@ def _build_probe_cmd(filename: str | PathLike[str], ffprobe_path: str = "ffprobe
         ffprobe_path,
         "-v",
         "quiet",
-        "-print_format",
+        "-of",
         "json",
         "-show_format",
         "-show_streams",

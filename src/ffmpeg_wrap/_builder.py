@@ -499,16 +499,23 @@ class FFmpeg:
         self._filter_graph_args = ["-filter_complex", graph_str]
         return self
 
-    def filter_complex_script(self, path: str | PathLike[str]) -> FFmpeg:
-        """Read a graph-level filtergraph from a UTF-8 file.
+    def filter_complex_script(self, path: str | PathLike[str], *, legacy: bool = False) -> FFmpeg:
+        """Read a graph-level filtergraph from a file, passing the path to ffmpeg.
 
-        Reads the file when this method is called and emits its contents via
-        ``-filter_complex`` in the same dedicated slot as :meth:`filter_complex`
-        (after global args, before inputs). Mutually exclusive with
-        :meth:`filter_complex` at runtime (not enforced here).
+        Emits ``-/filter_complex <path>`` (the ffmpeg 7.0+ file-option syntax) in
+        the same dedicated slot as :meth:`filter_complex` (after global args,
+        before inputs). ffmpeg reads the file itself when the command runs, so
+        the graph never becomes a single argv element and the per-argument
+        limit of the OS (128 KiB on Linux) does not apply. Mutually exclusive
+        with :meth:`filter_complex` at runtime (not enforced here).
 
         Args:
-            path: Path to a file containing the filtergraph.
+            path: Path to a UTF-8 file containing the filtergraph. It is not
+                opened here; ffmpeg resolves it relative to its own working
+                directory at run time.
+            legacy: Emit ``-filter_complex_script <path>`` instead. That is the
+                only form ffmpeg 6.1 and older accept; 7.x and 8.x accept it with
+                a deprecation warning, and ffmpeg 9.0 removed it.
 
         Returns:
             Self for chaining.
@@ -518,10 +525,12 @@ class FFmpeg:
             from ffmpeg_wrap import input
 
             input("in.mkv").filter_complex_script("graph.txt").output("out.mp4").run()
+            # ffmpeg -/filter_complex graph.txt -i in.mkv out.mp4
             ```
         """
-        graph_str = Path(path).read_text(encoding="utf-8")
-        self._filter_graph_args = ["-filter_complex", graph_str]
+        path_str = path if isinstance(path, str) else str(Path(path))
+        flag = "-filter_complex_script" if legacy else "-/filter_complex"
+        self._filter_graph_args = [flag, path_str]
         return self
 
     @overload

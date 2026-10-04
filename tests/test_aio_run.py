@@ -21,6 +21,7 @@ import pytest
 pytest.importorskip("anyio")
 
 import anyio
+from conftest import skip_unless_filter_script_form_supported, write_large_filtergraph
 
 import ffmpeg_wrap as ffmpeg
 import ffmpeg_wrap.aio as aio
@@ -35,6 +36,33 @@ def _failing_chain(real_file: Path) -> ffmpeg.FFmpeg:
 def _transcode_chain(real_file: Path, out: Path) -> ffmpeg.FFmpeg:
     """A short, real transcode that succeeds and prints progress to stderr."""
     return ffmpeg.input(real_file, t=1).output(str(out)).codec("v", "libx264").codec("a", "copy").overwrite_output()
+
+
+class TestAioFilterComplexScript:
+    async def test_arun_graph_above_argv_limit(self, real_file: Path, tmp_path: Path, ffmpeg_major: int | None) -> None:
+        skip_unless_filter_script_form_supported(ffmpeg_major, legacy=False)
+        script = write_large_filtergraph(tmp_path / "graph.txt")
+        chain = ffmpeg.input(real_file, t=0.5).filter_complex_script(script).output("-", f="null").map("[a]")
+        _stdout, stderr = await chain.overwrite_output().arun(capture_stderr=True)
+        assert isinstance(stderr, bytes)
+
+    async def test_aio_run_graph_above_argv_limit(
+        self, real_file: Path, tmp_path: Path, ffmpeg_major: int | None
+    ) -> None:
+        skip_unless_filter_script_form_supported(ffmpeg_major, legacy=False)
+        script = write_large_filtergraph(tmp_path / "graph.txt")
+        chain = ffmpeg.input(real_file, t=0.5).filter_complex_script(script).output("-", f="null").map("[a]")
+        _stdout, stderr = await aio.run(chain.overwrite_output(), capture_stderr=True)
+        assert isinstance(stderr, bytes)
+
+    async def test_arun_legacy_graph_above_argv_limit(
+        self, real_file: Path, tmp_path: Path, ffmpeg_major: int | None
+    ) -> None:
+        skip_unless_filter_script_form_supported(ffmpeg_major, legacy=True)
+        script = write_large_filtergraph(tmp_path / "graph.txt")
+        chain = ffmpeg.input(real_file, t=0.5).filter_complex_script(script, legacy=True).output("-", f="null")
+        _stdout, stderr = await chain.map("[a]").overwrite_output().arun(capture_stderr=True)
+        assert isinstance(stderr, bytes)
 
 
 class TestAioRunCapture:

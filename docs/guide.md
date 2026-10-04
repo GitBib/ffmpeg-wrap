@@ -109,14 +109,26 @@ outputs to multiple files:
 )
 ```
 
-For large graphs, read them from a UTF-8 file with `filter_complex_script()`.
-The file is read when the method is called and its contents are passed through
-the portable `-filter_complex` option. It is mutually exclusive with
-`filter_complex()` at runtime, so use one or the other:
+For large graphs, write them to a UTF-8 file and pass the path with
+`filter_complex_script()`. The builder emits `-/filter_complex <path>`, the
+ffmpeg 7.0+ syntax for loading an option value from a file, so ffmpeg reads the
+graph itself and it never becomes a single argv element. That matters because
+Linux caps one argument at 128 KiB (`MAX_ARG_STRLEN`): an inlined `-filter_complex`
+of that size fails with `E2BIG` before ffmpeg even starts. It is mutually
+exclusive with `filter_complex()` at runtime, so use one or the other:
 
 ```python
 ffmpeg.input("input.mkv").filter_complex_script("graph.txt").output("output.mp4").run()
-# ffmpeg -filter_complex "<contents of graph.txt>" -i input.mkv output.mp4
+# ffmpeg -/filter_complex graph.txt -i input.mkv output.mp4
+```
+
+For ffmpeg 6.1 and older pass `legacy=True` to emit `-filter_complex_script <path>`
+instead. ffmpeg 7.x and 8.x still accept that option with a deprecation warning;
+ffmpeg 9.0 removed it, so keep the default there.
+
+```python
+ffmpeg.input("input.mkv").filter_complex_script("graph.txt", legacy=True).output("output.mp4").run()
+# ffmpeg -filter_complex_script graph.txt -i input.mkv output.mp4
 ```
 
 When embedding a path inside a filtergraph (e.g. `subtitles=`), escape it with

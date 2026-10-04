@@ -444,7 +444,7 @@ class TestFilterComplex:
             "b.mp4",
         ]
 
-    def test_filter_complex_script_emits_file_contents(self, tmp_path):
+    def test_filter_complex_script_emits_file_option_with_path(self, tmp_path):
         script = tmp_path / "graph.txt"
         script.write_text("[0:v]null[v]", encoding="utf-8")
         ff = FFmpeg()
@@ -452,8 +452,8 @@ class TestFilterComplex:
         cmd = ff.compile()
         assert cmd == [
             "ffmpeg",
-            "-filter_complex",
-            "[0:v]null[v]",
+            "-/filter_complex",
+            str(script),
             "-i",
             "in.mkv",
             "out.mp4",
@@ -465,25 +465,66 @@ class TestFilterComplex:
         ff = FFmpeg()
         ff.input("in.mkv").output("out.mp4").filter_complex_script(script)
         cmd = ff.compile()
-        assert cmd[1] == "-filter_complex"
-        assert cmd[2] == "[0:v]null[v]"
+        assert cmd[1] == "-/filter_complex"
+        assert cmd[2] == str(script)
+
+    def test_filter_complex_script_legacy_emits_script_option(self, tmp_path):
+        script = tmp_path / "graph.txt"
+        script.write_text("[0:v]null[v]", encoding="utf-8")
+        ff = FFmpeg()
+        ff.input("in.mkv").output("out.mp4").filter_complex_script(script, legacy=True)
+        cmd = ff.compile()
+        assert cmd == [
+            "ffmpeg",
+            "-filter_complex_script",
+            str(script),
+            "-i",
+            "in.mkv",
+            "out.mp4",
+        ]
+
+    def test_filter_complex_script_legacy_is_keyword_only(self, tmp_path):
+        with pytest.raises(TypeError):
+            FFmpeg().filter_complex_script(tmp_path / "graph.txt", True)
+
+    def test_filter_complex_script_does_not_read_the_file(self, tmp_path):
+        missing = tmp_path / "missing.txt"
+        ff = FFmpeg()
+        ff.input("in.mkv").output("out.mp4").filter_complex_script(missing)
+        assert not missing.exists()
+        assert ff.compile()[1:3] == ["-/filter_complex", str(missing)]
+
+    def test_filter_complex_script_never_inlines_a_large_graph(self, tmp_path):
+        script = tmp_path / "graph.txt"
+        graph = "[0:a]" + ",".join(["volume=1.0"] * 12000) + "[a]"
+        assert len(graph.encode()) > 128 * 1024
+        script.write_text(graph, encoding="utf-8")
+        ff = FFmpeg()
+        ff.input("in.mkv").output("out.mp4").filter_complex_script(script)
+        cmd = ff.compile()
+        assert graph not in cmd
+        assert max(len(arg.encode()) for arg in cmd) < 4096
 
     def test_filter_complex_returns_self(self, tmp_path):
         script = tmp_path / "graph.txt"
-        script.write_text("[0:v]null[v]", encoding="utf-8")
         ff = FFmpeg()
         assert ff.filter_complex("[0:v]null[v]") is ff
         assert ff.filter_complex_script(script) is ff
 
     def test_filter_complex_last_call_wins(self, tmp_path):
         script = tmp_path / "graph.txt"
-        script.write_text("[0:v]b[v]", encoding="utf-8")
         ff = FFmpeg()
         ff.input("in.mkv").output("out.mp4").filter_complex("[0:v]a[v]").filter_complex_script(script)
         cmd = ff.compile()
-        assert cmd.count("-filter_complex") == 1
-        assert cmd[1] == "-filter_complex"
-        assert cmd[2] == "[0:v]b[v]"
+        assert "-filter_complex" not in cmd
+        assert cmd[1:3] == ["-/filter_complex", str(script)]
+
+    def test_filter_complex_script_then_filter_complex_wins(self, tmp_path):
+        ff = FFmpeg()
+        ff.input("in.mkv").output("out.mp4").filter_complex_script(tmp_path / "graph.txt").filter_complex("[0:v]a[v]")
+        cmd = ff.compile()
+        assert "-/filter_complex" not in cmd
+        assert cmd[1:3] == ["-filter_complex", "[0:v]a[v]"]
 
 
 class TestHwaccel:

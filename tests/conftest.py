@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import contextlib
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -69,6 +70,34 @@ def ffmpeg_available() -> None:
     """Skip the test unless both ffmpeg and ffprobe are on PATH."""
     if shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None:
         pytest.skip("ffmpeg/ffprobe not installed")
+
+
+@pytest.fixture(scope="session")
+def ffmpeg_major(ffmpeg_available: None) -> int | None:
+    banner = subprocess.run(
+        [shutil.which("ffmpeg") or "ffmpeg", "-version"], capture_output=True, text=True, check=False
+    ).stdout
+    match = re.match(r"ffmpeg version n?(\d+)\.", banner)
+    return int(match.group(1)) if match else None
+
+
+def skip_unless_filter_script_form_supported(ffmpeg_major: int | None, *, legacy: bool) -> None:
+    if ffmpeg_major is None:
+        return
+    if legacy and ffmpeg_major >= 9:
+        pytest.skip("-filter_complex_script was removed in ffmpeg 9.0")
+    if not legacy and ffmpeg_major < 7:
+        pytest.skip("-/filter_complex needs ffmpeg 7.0+")
+
+
+def write_large_filtergraph(path: Path, branches: int = 1800) -> Path:
+    split = f"[0:a]asplit={branches}" + "".join(f"[split_{i:05d}]" for i in range(branches))
+    chains = ";\n".join(f"[split_{i:05d}]adelay={i % 500}|{i % 500},volume=0.5[mixed_{i:05d}]" for i in range(branches))
+    mix = "".join(f"[mixed_{i:05d}]" for i in range(branches)) + f"amix=inputs={branches}:normalize=0[a]"
+    graph = f"{split};\n{chains};\n{mix}\n"
+    assert len(graph.encode()) > 128 * 1024
+    path.write_text(graph, encoding="utf-8")
+    return path
 
 
 @pytest.fixture

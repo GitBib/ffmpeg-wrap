@@ -10,6 +10,8 @@ A typed Python wrapper for FFmpeg and ffprobe CLI tools. Build FFmpeg commands w
 
 - Python 3.10+
 - FFmpeg and ffprobe installed and available on PATH
+- `filter_complex_script()` emits the ffmpeg 7.0+ `-/filter_complex` file syntax by default;
+  pass `legacy=True` on ffmpeg 6.1 and older
 
 ## Installation
 
